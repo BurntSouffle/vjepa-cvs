@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Results and checkpoints
+results/
+*.pt
+*.pth
+*.ckpt
+*.log
+
+# Windows batch files
+*.bat
+
+# Test files
+test_*.py
+*_test.py
+*_output.txt
+*_result.txt
+
+# Exploration/debug scripts
+vjepa2_exploration.py
+debug_metrics.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Local configs (contain user-specific paths)
+config_local.yaml
+configs/*_local.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large files
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Datasets (should be downloaded separately)
+data/
+datasets/

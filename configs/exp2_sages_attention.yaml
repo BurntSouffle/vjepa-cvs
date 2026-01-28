@@ -1,0 +1,80 @@
+# Experiment 2: SAGES + Attention Pooling
+# ========================================
+# Purpose: Test if attention pooling helps learn better representations
+# Target: RunPod
+#
+# Configuration:
+#   - Dataset: SAGES + Endoscapes combined
+#   - Model: ViT-L frozen
+#   - Pooling: Attention (learnable)
+#   - Head: MLP (current)
+
+# Paths
+data:
+  sages_root: "/workspace/sages_cvs_challenge_2025_r1"
+  endoscapes_root: "/workspace/endoscapes"
+  results_dir: "results/exp2_sages_attention"
+  dataset_type: "combined"
+
+# Model
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  freeze_backbone: true
+  hidden_dim: 1024
+  classifier_hidden: 512
+  num_classes: 3
+  dropout: 0.5
+  # Experiment-specific settings
+  pooling_type: "attention"   # CHANGED: attention pooling
+  head_type: "mlp"
+  attention_heads: 8
+  attention_dropout: 0.1
+
+# Data loading
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  augment_train: true
+  horizontal_flip_prob: 0.5
+  sages_val_ratio: 0.2
+
+# Training
+training:
+  batch_size: 32
+  num_workers: 4
+  epochs: 50
+  optimizer: "adamw"
+  learning_rate: 5.0e-4
+  weight_decay: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  early_stopping: true
+  patience: 10
+  grad_clip: 1.0
+
+# Loss
+loss:
+  type: "bce_with_logits"
+  use_class_weights: false
+  pos_weight: [1.0, 1.0, 1.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "balanced_accuracy", "f1"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 10
+  save_every_n_epochs: 5
+
+# Reproducibility
+seed: 42
+
+# Experiment metadata
+experiment:
+  name: "exp2_sages_attention"
+  description: "SAGES + Endoscapes with attention pooling and MLP head"
+  hypothesis: "Attention pooling learns which tokens are most informative for CVS"

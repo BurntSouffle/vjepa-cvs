@@ -1,0 +1,70 @@
+# V-JEPA 2 CVS Classification Configuration
+# ==========================================
+# Default config for RunPod. Use config_local.yaml for Windows.
+
+# Paths (RunPod defaults - override with config_local.yaml for Windows)
+data:
+  endoscapes_root: "/workspace/endoscapes"
+  sages_root: "/workspace/sages_cvs_challenge_2025_r1"
+  metadata_csv: "all_metadata.csv"
+  train_vids: "train_vids.txt"
+  val_vids: "val_vids.txt"
+  test_vids: "test_vids.txt"
+  results_dir: "results"
+  dataset_type: "endoscapes"  # "endoscapes", "sages", or "combined"
+
+# Model
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  freeze_backbone: true
+  hidden_dim: 1024
+  classifier_hidden: 512
+  num_classes: 3
+  dropout: 0.5
+  pooling_type: "mean"    # "mean" or "attention"
+  head_type: "mlp"        # "mlp" or "simple"
+  attention_heads: 8
+  attention_dropout: 0.1
+
+# Data loading
+dataset:
+  num_frames: 16
+  frame_step: 25  # Endoscapes frame step
+  resolution: 256
+  augment_train: true
+  horizontal_flip_prob: 0.5
+  sages_val_ratio: 0.2  # For SAGES train/val split
+
+# Training
+training:
+  batch_size: 32
+  num_workers: 4
+  epochs: 50
+  optimizer: "adamw"
+  learning_rate: 5.0e-4
+  weight_decay: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  early_stopping: true
+  patience: 10
+  grad_clip: 1.0
+
+# Loss
+loss:
+  type: "bce_with_logits"
+  use_class_weights: false
+  pos_weight: [1.0, 1.0, 1.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "balanced_accuracy", "f1"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 10
+  save_every_n_epochs: 5
+
+# Reproducibility
+seed: 42

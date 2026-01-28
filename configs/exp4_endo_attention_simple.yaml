@@ -1,0 +1,78 @@
+# Experiment 4: Endoscapes + Attention + Simple Head
+# ===================================================
+# Purpose: Best regularisation without SAGES (local backup)
+# Target: Local 3080 (after baseline finishes)
+#
+# Configuration:
+#   - Dataset: Endoscapes only
+#   - Model: ViT-L frozen
+#   - Pooling: Attention
+#   - Head: Simple
+
+# Paths (RunPod - use config_local.yaml paths for Windows)
+data:
+  endoscapes_root: "/workspace/endoscapes"
+  results_dir: "results/exp4_endo_attention_simple"
+  dataset_type: "endoscapes"  # Endoscapes only
+
+# Model
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  freeze_backbone: true
+  hidden_dim: 1024
+  classifier_hidden: 512  # Not used for simple head
+  num_classes: 3
+  dropout: 0.5
+  # Experiment-specific settings
+  pooling_type: "attention"   # CHANGED: attention pooling
+  head_type: "simple"         # CHANGED: simple head
+  attention_heads: 8
+  attention_dropout: 0.1
+
+# Data loading
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  augment_train: true
+  horizontal_flip_prob: 0.5
+
+# Training
+training:
+  batch_size: 32
+  num_workers: 4
+  epochs: 50
+  optimizer: "adamw"
+  learning_rate: 5.0e-4
+  weight_decay: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  early_stopping: true
+  patience: 10
+  grad_clip: 1.0
+
+# Loss
+loss:
+  type: "bce_with_logits"
+  use_class_weights: false
+  pos_weight: [1.0, 1.0, 1.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "balanced_accuracy", "f1"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 10
+  save_every_n_epochs: 5
+
+# Reproducibility
+seed: 42
+
+# Experiment metadata
+experiment:
+  name: "exp4_endo_attention_simple"
+  description: "Endoscapes only with attention pooling and simple head"
+  hypothesis: "Maximum regularisation to combat limited data"
