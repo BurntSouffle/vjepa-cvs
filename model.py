@@ -299,6 +299,12 @@ class VJEPA_CVS(nn.Module):
 
             frozen_params = total_backbone_params - unfrozen_params
 
+            # CRITICAL: Convert entire backbone to float32 for stable training
+            # fp16 parameters cause NaN during optimizer updates
+            # This uses more memory but is necessary for fine-tuning
+            self.backbone = self.backbone.float()
+            print("Converted backbone to float32 for stable fine-tuning")
+
             # Keep backbone in train mode for unfrozen layers
             # But we'll set it to eval in forward if fully frozen
         else:

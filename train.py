@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -39,6 +40,7 @@ def train_epoch(
     epoch: int,
     config: dict,
     logger,
+    scaler: GradScaler = None,
 ) -> dict:
     """Train for one epoch."""
     model.train()
@@ -61,32 +63,65 @@ def train_epoch(
         # Process videos
         pixel_values = model.process_videos(videos, device)
 
-        # Forward pass
+        # Forward pass with optional mixed precision
         optimizer.zero_grad()
-        logits = model(pixel_values)
 
-        # Compute loss
-        loss = criterion(logits, labels)
+        if scaler is not None:
+            # Mixed precision training (for fp16 backbone fine-tuning)
+            with autocast():
+                logits = model(pixel_values)
+                loss = criterion(logits, labels)
 
-        # Check for NaN loss and skip batch if detected
-        if torch.isnan(loss) or torch.isinf(loss):
-            logger.warning(f"NaN/Inf loss detected at step {batch_idx}, skipping batch")
-            optimizer.zero_grad()
-            continue
+            # Check for NaN loss and skip batch if detected
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.warning(f"NaN/Inf loss detected at step {batch_idx}, skipping batch")
+                optimizer.zero_grad()
+                continue
 
-        # Backward pass
-        loss.backward()
+            # Scaled backward pass
+            scaler.scale(loss).backward()
 
-        # Gradient clipping (always apply for stability)
-        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
+            # Unscale gradients for clipping
+            scaler.unscale_(optimizer)
 
-        # Check for NaN gradients
-        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping batch")
-            optimizer.zero_grad()
-            continue
+            # Gradient clipping
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
 
-        optimizer.step()
+            # Check for NaN gradients (can happen if scaler scale is too high)
+            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping batch (scaler will adjust)")
+                scaler.update()  # Update scaler to reduce scale
+                optimizer.zero_grad()
+                continue
+
+            # Optimizer step with scaler
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Standard training (frozen backbone)
+            logits = model(pixel_values)
+            loss = criterion(logits, labels)
+
+            # Check for NaN loss and skip batch if detected
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.warning(f"NaN/Inf loss detected at step {batch_idx}, skipping batch")
+                optimizer.zero_grad()
+                continue
+
+            # Backward pass
+            loss.backward()
+
+            # Gradient clipping (always apply for stability)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
+
+            # Check for NaN gradients
+            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping batch")
+                optimizer.zero_grad()
+                continue
+
+            optimizer.step()
+
         scheduler.step()
 
         # Update metrics
@@ -389,6 +424,10 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
         mode="max",
     ) if config["training"]["early_stopping"] else None
 
+    # Note: GradScaler not needed - backbone is converted to float32 when fine-tuning
+    # This uses more VRAM but prevents NaN issues with fp16 optimizer updates
+    scaler = None
+
     # ========== SANITY CHECK ==========
     logger.info("\n" + "="*60)
     logger.info("=== TRAINING SANITY CHECK ===")
@@ -533,7 +572,7 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
 
         # Train
         train_metrics = train_epoch(
-            model, train_loader, criterion, optimizer, scheduler, device, epoch, config, logger
+            model, train_loader, criterion, optimizer, scheduler, device, epoch, config, logger, scaler
         )
         logger.info(f"Train {format_metrics(train_metrics, 'Train')}")
 
