@@ -51,7 +51,7 @@ training:
   epochs: 50
   optimizer: "adamw"
   # Differential learning rates
-  backbone_lr: 1.0e-5            # 10x lower for backbone (fine-tuning)
+  backbone_lr: 1.0e-6            # 100x lower for backbone (prevent NaN)
   head_lr: 1.0e-4                # Normal LR for attention pooling + head
   learning_rate: 1.0e-4          # Fallback (used if differential not supported)
   weight_decay: 0.1              # Strong regularization

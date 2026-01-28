@@ -68,12 +68,23 @@ def train_epoch(
         # Compute loss
         loss = criterion(logits, labels)
 
+        # Check for NaN loss and skip batch if detected
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.warning(f"NaN/Inf loss detected at step {batch_idx}, skipping batch")
+            optimizer.zero_grad()
+            continue
+
         # Backward pass
         loss.backward()
 
-        # Gradient clipping
-        if config["training"]["grad_clip"] > 0:
-            nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
+        # Gradient clipping (always apply for stability)
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
+
+        # Check for NaN gradients
+        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+            logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping batch")
+            optimizer.zero_grad()
+            continue
 
         optimizer.step()
         scheduler.step()
