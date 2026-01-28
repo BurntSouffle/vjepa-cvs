@@ -4,8 +4,8 @@
 
 # Paths (RunPod defaults - override with config_local.yaml for Windows)
 data:
-  endoscapes_root: "/workspace/endoscapes"
-  sages_root: "/workspace/sages_cvs_challenge_2025_r1"
+  endoscapes_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/endoscapes"
+  sages_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/sages_cvs_challenge_2025_r1"
   metadata_csv: "all_metadata.csv"
   train_vids: "train_vids.txt"
   val_vids: "val_vids.txt"

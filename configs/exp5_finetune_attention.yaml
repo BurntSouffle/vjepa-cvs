@@ -1,0 +1,89 @@
+# Experiment 5: Fine-tune V-JEPA Last Layers + Attention Pooling
+# ===============================================================
+# Purpose: Push past SoTA (67.45% mAP) by fine-tuning last 4 V-JEPA layers
+# Target: RunPod (requires more VRAM than frozen experiments)
+#
+# Current best: 55.05% (exp2 frozen + attention)
+# SoTA target: 67.45% (SwinCVS)
+# Gap to close: 12.4%
+#
+# Strategy:
+#   - Unfreeze last 4 transformer layers (domain adaptation)
+#   - Keep early layers frozen (generic visual features)
+#   - Differential learning rates (10x lower for backbone)
+#   - Strong regularization (more params = more overfitting risk)
+
+# Paths (RunPod)
+data:
+  sages_root: "/workspace/sages_cvs_challenge_2025_r1"
+  endoscapes_root: "/workspace/endoscapes"
+  results_dir: "results/exp5_finetune_attention"
+  dataset_type: "combined"
+
+# Model
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  freeze_backbone: false         # KEY CHANGE: allow fine-tuning
+  unfreeze_last_n_layers: 4      # Only unfreeze last 4 transformer layers
+  hidden_dim: 1024
+  classifier_hidden: 512
+  num_classes: 3
+  dropout: 0.5                   # Strong dropout for regularization
+  # Keep attention pooling (proven winner from exp2)
+  pooling_type: "attention"
+  head_type: "mlp"
+  attention_heads: 8
+  attention_dropout: 0.1
+
+# Data loading
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  augment_train: true
+  horizontal_flip_prob: 0.5
+  sages_val_ratio: 0.2
+
+# Training
+training:
+  batch_size: 32                 # May need to reduce if OOM
+  num_workers: 4
+  epochs: 50
+  optimizer: "adamw"
+  # Differential learning rates
+  backbone_lr: 1.0e-5            # 10x lower for backbone (fine-tuning)
+  head_lr: 1.0e-4                # Normal LR for attention pooling + head
+  learning_rate: 1.0e-4          # Fallback (used if differential not supported)
+  weight_decay: 0.1              # Strong regularization
+  scheduler: "cosine"
+  warmup_epochs: 3               # Shorter warmup for fine-tuning
+  min_lr: 1.0e-7                 # Lower min LR
+  early_stopping: true
+  patience: 10
+  grad_clip: 1.0
+
+# Loss
+loss:
+  type: "bce_with_logits"
+  use_class_weights: false
+  pos_weight: [1.0, 1.0, 1.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "balanced_accuracy", "f1"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 10
+  save_every_n_epochs: 5
+
+# Reproducibility
+seed: 42
+
+# Experiment metadata
+experiment:
+  name: "exp5_finetune_attention"
+  description: "Fine-tune last 4 V-JEPA layers + attention pooling + MLP head"
+  hypothesis: "Partial fine-tuning adapts V-JEPA features to surgical domain while preserving generic visual knowledge"
+  expected_trainable_params: "~59M (4 layers ~54M + head ~5M)"

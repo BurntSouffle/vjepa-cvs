@@ -148,7 +148,7 @@ class VJEPA_CVS(nn.Module):
     V-JEPA 2 based CVS classifier.
 
     Architecture:
-        V-JEPA Encoder (frozen or trainable)
+        V-JEPA Encoder (frozen or partially trainable)
             -> Pooling (mean or attention)
             -> Head (MLP or simple)
             -> 3 logits (C1, C2, C3)
@@ -156,12 +156,14 @@ class VJEPA_CVS(nn.Module):
     Configurable components:
         - pooling_type: "mean" or "attention"
         - head_type: "mlp" or "simple"
+        - freeze_backbone: full freeze or partial unfreeze
     """
 
     def __init__(
         self,
         model_name: str = "facebook/vjepa2-vitl-fpc16-256-ssv2",
         freeze_backbone: bool = True,
+        unfreeze_last_n_layers: int = 0,
         hidden_dim: int = 1024,
         classifier_hidden: int = 512,
         num_classes: int = 3,
@@ -175,6 +177,7 @@ class VJEPA_CVS(nn.Module):
         Args:
             model_name: HuggingFace model name for V-JEPA 2
             freeze_backbone: Whether to freeze the V-JEPA encoder
+            unfreeze_last_n_layers: Number of last transformer layers to unfreeze (0 = all frozen)
             hidden_dim: V-JEPA hidden dimension (1024 for ViT-L)
             classifier_hidden: Hidden dimension of classifier MLP
             num_classes: Number of output classes (3 for CVS)
@@ -188,6 +191,7 @@ class VJEPA_CVS(nn.Module):
 
         self.model_name = model_name
         self.freeze_backbone = freeze_backbone
+        self.unfreeze_last_n_layers = unfreeze_last_n_layers
         self.hidden_dim = hidden_dim
         self.pooling_type = pooling_type
         self.head_type = head_type
@@ -202,12 +206,8 @@ class VJEPA_CVS(nn.Module):
         # Load processor
         self.processor = AutoVideoProcessor.from_pretrained(model_name)
 
-        # Freeze backbone if specified
-        if freeze_backbone:
-            print("Freezing V-JEPA backbone")
-            for param in self.backbone.parameters():
-                param.requires_grad = False
-            self.backbone.eval()
+        # Setup backbone freezing (full or partial)
+        self._setup_backbone_freezing(freeze_backbone, unfreeze_last_n_layers)
 
         # Pooling layer
         if pooling_type == "attention":
@@ -238,6 +238,86 @@ class VJEPA_CVS(nn.Module):
                 dropout=dropout,
             )
 
+    def _setup_backbone_freezing(self, freeze_backbone: bool, unfreeze_last_n_layers: int = 0):
+        """
+        Setup backbone freezing with optional partial unfreezing of last N layers.
+
+        V-JEPA ViT-L has 24 transformer layers. This allows fine-tuning only the
+        last N layers while keeping early layers (generic features) frozen.
+
+        Args:
+            freeze_backbone: If True and unfreeze_last_n_layers=0, freeze everything
+            unfreeze_last_n_layers: Number of last layers to unfreeze (0 = all frozen)
+        """
+        # First, freeze ALL backbone parameters
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+        # Count total parameters for reporting
+        total_backbone_params = sum(p.numel() for p in self.backbone.parameters())
+
+        if freeze_backbone and unfreeze_last_n_layers == 0:
+            # Full freeze
+            print("Freezing entire V-JEPA backbone")
+            self.backbone.eval()
+            frozen_params = total_backbone_params
+            unfrozen_params = 0
+        elif unfreeze_last_n_layers > 0:
+            # Partial unfreeze - unfreeze last N transformer layers
+            total_layers = 24  # ViT-L has 24 layers
+            start_unfreeze = total_layers - unfreeze_last_n_layers
+
+            print(f"Unfreezing last {unfreeze_last_n_layers} transformer layers (layers {start_unfreeze}-{total_layers-1})")
+
+            unfrozen_params = 0
+            for name, param in self.backbone.named_parameters():
+                # Check if this param belongs to a layer >= start_unfreeze
+                # V-JEPA uses 'encoder.layer.X.' pattern (note: singular 'layer', not 'layers')
+                should_unfreeze = False
+
+                # Try different naming patterns used by different model architectures
+                for pattern in ['encoder.layer.', 'encoder.layers.', 'blocks.', 'layer.']:
+                    if pattern in name:
+                        # Extract layer number
+                        try:
+                            # Find the number after the pattern
+                            after_pattern = name.split(pattern)[1]
+                            layer_num = int(after_pattern.split('.')[0])
+                            if layer_num >= start_unfreeze:
+                                should_unfreeze = True
+                                break
+                        except (ValueError, IndexError):
+                            continue
+
+                # Also unfreeze final layer norm if it exists (encoder.norm)
+                if name == 'encoder.norm.weight' or name == 'encoder.norm.bias':
+                    should_unfreeze = True
+
+                if should_unfreeze:
+                    param.requires_grad = True
+                    unfrozen_params += param.numel()
+
+            frozen_params = total_backbone_params - unfrozen_params
+
+            # Keep backbone in train mode for unfrozen layers
+            # But we'll set it to eval in forward if fully frozen
+        else:
+            # Full unfreeze (freeze_backbone=False and unfreeze_last_n_layers=0)
+            print("Unfreezing entire V-JEPA backbone (full fine-tuning)")
+            for param in self.backbone.parameters():
+                param.requires_grad = True
+            frozen_params = 0
+            unfrozen_params = total_backbone_params
+
+        # Report parameter counts
+        print(f"Backbone total params: {total_backbone_params / 1e6:.1f}M")
+        print(f"Backbone frozen params: {frozen_params / 1e6:.1f}M")
+        print(f"Backbone unfrozen params: {unfrozen_params / 1e6:.1f}M")
+
+        # Store for later use
+        self._backbone_frozen_params = frozen_params
+        self._backbone_unfrozen_params = unfrozen_params
+
     def forward(self, pixel_values_videos: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
@@ -250,7 +330,8 @@ class VJEPA_CVS(nn.Module):
             logits: (B, num_classes) classification logits
         """
         # Get V-JEPA features
-        if self.freeze_backbone:
+        # Use no_grad only if backbone is fully frozen (no unfrozen layers)
+        if self.freeze_backbone and self.unfreeze_last_n_layers == 0:
             with torch.no_grad():
                 features = self.backbone.get_vision_features(
                     pixel_values_videos=pixel_values_videos
@@ -307,6 +388,7 @@ def create_model(config: dict) -> VJEPA_CVS:
     model = VJEPA_CVS(
         model_name=model_cfg["name"],
         freeze_backbone=model_cfg["freeze_backbone"],
+        unfreeze_last_n_layers=model_cfg.get("unfreeze_last_n_layers", 0),
         hidden_dim=model_cfg["hidden_dim"],
         classifier_hidden=model_cfg.get("classifier_hidden", 512),
         num_classes=model_cfg["num_classes"],

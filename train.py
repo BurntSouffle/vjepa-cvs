@@ -43,8 +43,9 @@ def train_epoch(
     """Train for one epoch."""
     model.train()
 
-    # Only set classifier to train mode if backbone is frozen
-    if config["model"]["freeze_backbone"]:
+    # Set backbone to eval mode only if fully frozen (no unfrozen layers)
+    unfreeze_last_n = config["model"].get("unfreeze_last_n_layers", 0)
+    if config["model"]["freeze_backbone"] and unfreeze_last_n == 0:
         model.backbone.eval()
 
     loss_meter = AverageMeter()
@@ -321,13 +322,45 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
     else:
         criterion = nn.BCEWithLogitsLoss()
 
-    # Optimizer - only optimize trainable parameters
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=config["training"]["learning_rate"],
-        weight_decay=config["training"]["weight_decay"],
-    )
+    # Optimizer - with optional differential learning rates for backbone vs head
+    backbone_lr = config["training"].get("backbone_lr", None)
+    head_lr = config["training"].get("head_lr", None)
+
+    if backbone_lr is not None and head_lr is not None:
+        # Differential learning rates: separate backbone and head parameters
+        backbone_params = []
+        head_params = []
+
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                if 'backbone' in name:
+                    backbone_params.append(param)
+                else:
+                    head_params.append(param)
+
+        # Count params for logging
+        backbone_param_count = sum(p.numel() for p in backbone_params)
+        head_param_count = sum(p.numel() for p in head_params)
+        logger.info(f"Differential LR: backbone={backbone_lr:.1e} ({backbone_param_count/1e6:.1f}M params), head={head_lr:.1e} ({head_param_count/1e6:.1f}M params)")
+
+        param_groups = []
+        if backbone_params:
+            param_groups.append({'params': backbone_params, 'lr': backbone_lr})
+        if head_params:
+            param_groups.append({'params': head_params, 'lr': head_lr})
+
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            weight_decay=config["training"]["weight_decay"],
+        )
+    else:
+        # Single learning rate for all trainable parameters
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=config["training"]["learning_rate"],
+            weight_decay=config["training"]["weight_decay"],
+        )
 
     # Learning rate scheduler
     num_training_steps = len(train_loader) * config["training"]["epochs"]
@@ -356,7 +389,17 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
     frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     logger.info(f"Trainable params: {trainable_params:,} ({trainable_params/1e6:.2f}M)")
     logger.info(f"Frozen params: {frozen_params:,} ({frozen_params/1e6:.2f}M)")
-    logger.info(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+
+    # Detailed breakdown: backbone vs head
+    backbone_trainable = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and 'backbone' in n)
+    head_trainable = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and 'backbone' not in n)
+    logger.info(f"  - Backbone trainable: {backbone_trainable:,} ({backbone_trainable/1e6:.2f}M)")
+    logger.info(f"  - Head trainable: {head_trainable:,} ({head_trainable/1e6:.2f}M)")
+
+    # Report learning rates for each param group
+    for i, pg in enumerate(optimizer.param_groups):
+        logger.info(f"Optimizer param group {i}: LR={pg['lr']:.1e}, params={sum(p.numel() for p in pg['params'])/1e6:.2f}M")
+
     logger.info(f"Weight decay: {config['training']['weight_decay']}")
     logger.info(f"Dropout: {config['model']['dropout']}")
 
@@ -398,17 +441,36 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
         logger.info(f"Labels are on: {test_labels.device}")
         logger.info(f"Logits are on: {test_logits.device}")
 
-    # Verify backbone is frozen
+    # Verify backbone freeze/unfreeze configuration
     logger.info("\n--- Backbone Freeze Check ---")
     backbone_grads = [p.requires_grad for p in model.backbone.parameters()]
     classifier_grads = [p.requires_grad for p in model.classifier.parameters()]
+    pooler_grads = [p.requires_grad for p in model.pooler.parameters()] if hasattr(model.pooler, 'parameters') else []
+
     logger.info(f"Backbone params requiring grad: {sum(backbone_grads)} / {len(backbone_grads)}")
     logger.info(f"Classifier params requiring grad: {sum(classifier_grads)} / {len(classifier_grads)}")
+    if pooler_grads:
+        logger.info(f"Pooler params requiring grad: {sum(pooler_grads)} / {len(pooler_grads)}")
 
-    if sum(backbone_grads) == 0 and sum(classifier_grads) > 0:
-        logger.info("✓ Backbone frozen, classifier trainable - CORRECT")
+    unfreeze_last_n = config["model"].get("unfreeze_last_n_layers", 0)
+    if config["model"]["freeze_backbone"] and unfreeze_last_n == 0:
+        # Full freeze expected
+        if sum(backbone_grads) == 0 and sum(classifier_grads) > 0:
+            logger.info("[OK] Backbone fully frozen, classifier trainable")
+        else:
+            logger.warning("[WARN] Freeze configuration may be incorrect!")
+    elif unfreeze_last_n > 0:
+        # Partial unfreeze expected
+        if sum(backbone_grads) > 0 and sum(classifier_grads) > 0:
+            logger.info(f"[OK] Partial fine-tuning: {sum(backbone_grads)}/{len(backbone_grads)} backbone params trainable")
+        else:
+            logger.warning("[WARN] Partial unfreeze configuration may be incorrect!")
     else:
-        logger.warning("⚠ WARNING: Freeze configuration may be incorrect!")
+        # Full unfreeze (freeze_backbone=False)
+        if sum(backbone_grads) == len(backbone_grads):
+            logger.info("[OK] Full fine-tuning: entire backbone trainable")
+        else:
+            logger.warning("[WARN] Full unfreeze configuration may be incorrect!")
 
     # Expected values check
     logger.info("\n--- Dataset Size Check ---")
@@ -429,10 +491,19 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
     else:
         logger.info(f"✓ Dataset size check passed (custom dataset)")
 
-    if trainable_params < 1_000_000:
-        logger.info(f"✓ Trainable params {trainable_params:,} < 1M - classifier only")
+    unfreeze_last_n = config["model"].get("unfreeze_last_n_layers", 0)
+    if config["model"]["freeze_backbone"] and unfreeze_last_n == 0:
+        # Full freeze - expect small param count
+        if trainable_params < 10_000_000:
+            logger.info(f"[OK] Trainable params {trainable_params:,} - head only (frozen backbone)")
+        else:
+            logger.warning(f"[WARN] Trainable params {trainable_params:,} >= 10M - backbone may not be frozen!")
+    elif unfreeze_last_n > 0:
+        # Partial fine-tuning - expect larger param count
+        logger.info(f"[OK] Trainable params {trainable_params:,} - partial fine-tuning ({unfreeze_last_n} layers + head)")
     else:
-        logger.warning(f"⚠ Trainable params {trainable_params:,} >= 1M - backbone may not be frozen!")
+        # Full fine-tuning
+        logger.info(f"[OK] Trainable params {trainable_params:,} - full fine-tuning")
 
     logger.info("\n" + "="*60)
     logger.info("=== SANITY CHECK COMPLETE ===")
