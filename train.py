@@ -17,6 +17,7 @@ from tqdm import tqdm
 from dataset import EndoscapesCVSDataset, collate_fn as endo_collate_fn, get_class_weights as endo_get_class_weights
 from dataset_sages import SAGESCVSDataset, get_class_weights as sages_get_class_weights
 from dataset_combined import CombinedCVSDataset, collate_fn as combined_collate_fn, get_class_weights as combined_get_class_weights
+from dataset_cached import CachedCVSDataset, collate_fn as cached_collate_fn
 from model import create_model
 from utils import (
     AverageMeter,
@@ -250,9 +251,43 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
     # Create datasets based on dataset_type
     logger.info("Creating datasets...")
     dataset_type = config["data"].get("dataset_type", "endoscapes")
+    use_cache = config["dataset"].get("use_cache", False)
     logger.info(f"Dataset type: {dataset_type}")
+    logger.info(f"Use cache: {use_cache}")
 
-    if dataset_type == "combined":
+    if use_cache:
+        # Use cached tensor dataset for faster loading
+        cache_dir = config["dataset"]["cache_dir"]
+        logger.info(f"Using cached dataset from: {cache_dir}")
+
+        train_dataset = CachedCVSDataset(
+            cache_dir=cache_dir,
+            sages_root=config["data"]["sages_root"],
+            endoscapes_root=config["data"]["endoscapes_root"],
+            split="train",
+            num_frames=config["dataset"]["num_frames"],
+            resolution=config["dataset"]["resolution"],
+            augment=config["dataset"]["augment_train"],
+            horizontal_flip_prob=config["dataset"]["horizontal_flip_prob"],
+            sages_val_ratio=config["dataset"].get("sages_val_ratio", 0.2),
+            seed=config["seed"],
+        )
+        val_dataset = CachedCVSDataset(
+            cache_dir=cache_dir,
+            sages_root=config["data"]["sages_root"],
+            endoscapes_root=config["data"]["endoscapes_root"],
+            split="val",
+            num_frames=config["dataset"]["num_frames"],
+            resolution=config["dataset"]["resolution"],
+            augment=False,
+            sages_val_ratio=config["dataset"].get("sages_val_ratio", 0.2),
+            seed=config["seed"],
+        )
+        collate_fn = cached_collate_fn
+        # Use combined class weights function
+        get_class_weights = combined_get_class_weights
+
+    elif dataset_type == "combined":
         # Combined SAGES + Endoscapes
         train_dataset = CombinedCVSDataset(
             sages_root=config["data"]["sages_root"],
