@@ -1,0 +1,119 @@
+# Experiment 8: Multi-task Fine-tuning (CVS Classification + Segmentation)
+# =========================================================================
+# Purpose: Joint learning of CVS classification and anatomical segmentation
+# Platform: RunPod A100 (40GB/80GB)
+#
+# Key changes from Exp2 baseline:
+#   1. Unfreeze last 2 V-JEPA layers for fine-tuning
+#   2. Add segmentation head for anatomical structure prediction
+#   3. Use mask supervision on ~51% of training clips
+#   4. Differential learning rates (backbone vs heads)
+#
+# Segmentation classes:
+#   0: Background
+#   1: Cystic Plate (C2 criterion)
+#   2: Calot Triangle (C1 criterion)
+#   3: Cystic Artery (C3 criterion)
+#   4: Cystic Duct (C3 criterion)
+#
+# Expected improvements:
+#   - Better C2 detection (cystic plate has explicit supervision)
+#   - Anatomically-grounded attention patterns
+#   - More robust feature learning through multi-task regularization
+
+# Paths (RunPod)
+data:
+  endoscapes_root: "/workspace/data/endoscapes"
+  results_dir: "/workspace/results/exp8_finetune_multitask"
+
+# Model configuration
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  unfreeze_last_n_layers: 2  # Fine-tune last 2 transformer layers
+  hidden_dim: 1024           # V-JEPA ViT-L hidden dim
+
+  # CVS classification head
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+
+  # Segmentation head
+  num_seg_classes: 5         # Background + 4 anatomical structures
+  seg_output_size: 64        # Output mask resolution
+  seg_dropout: 0.1
+
+# Dataset configuration
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  mask_resolution: 64        # Downsampled for efficiency
+  augment_train: true
+  horizontal_flip_prob: 0.5
+  use_synthetic_masks: true  # Use SAM2 masks as fallback
+
+# Training configuration
+training:
+  batch_size: 16             # Reduced for fine-tuning (more VRAM needed)
+  gradient_accumulation_steps: 2  # Effective batch size = 32
+  num_workers: 8
+  mixed_precision: true
+  epochs: 20
+
+  # Differential learning rates
+  backbone_lr: 1.0e-5        # Low LR for pretrained backbone
+  head_lr: 5.0e-4            # Higher LR for new heads
+
+  weight_decay: 0.05         # Lower than frozen baseline
+  scheduler: "cosine"
+  warmup_epochs: 2
+  min_lr: 1.0e-6
+
+  early_stopping: true
+  patience: 7
+  early_stopping_metric: "mAP"
+  grad_clip: 1.0
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0            # Weight for CVS classification loss
+  seg_weight: 0.5            # Weight for segmentation loss
+
+  # CVS pos_weight (address C2 imbalance)
+  cvs_pos_weight: [1.0, 3.0, 1.0]  # [C1, C2, C3] - 3x for C2
+
+  # Segmentation class weights (address class imbalance)
+  # Background is much more common, anatomical structures are rare
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]  # [bg, cystic_plate, calot, artery, duct]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "balanced_accuracy"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_every_n_epochs: 1
+
+# Reproducibility
+seed: 42
+
+# Experiment metadata
+experiment:
+  name: "exp8_finetune_multitask"
+  description: "Multi-task V-JEPA fine-tuning with CVS classification + segmentation"
+  hypothesis: >
+    Joint segmentation learning provides explicit anatomical supervision that:
+    1. Improves C2 detection (cystic plate now directly supervised)
+    2. Guides attention to anatomically relevant regions
+    3. Creates better feature representations through multi-task regularization
+  baseline: "exp2_local_attention (49.79% mAP)"
+  key_changes:
+    - "Unfreeze last 2 V-JEPA layers"
+    - "Add segmentation head (5 classes)"
+    - "Mask supervision on 51% of clips"
+    - "Differential LR (1e-5 backbone, 5e-4 heads)"
+  gpu: "A100 40GB/80GB"
+  effective_batch_size: 32
