@@ -11,10 +11,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
-from dataset import EndoscapesCVSDataset, collate_fn as endo_collate_fn, get_class_weights as endo_get_class_weights
+from dataset import EndoscapesCVSDataset, collate_fn as endo_collate_fn, get_class_weights as endo_get_class_weights, get_sample_weights as endo_get_sample_weights
 from dataset_sages import SAGESCVSDataset, get_class_weights as sages_get_class_weights
 from dataset_combined import CombinedCVSDataset, collate_fn as combined_collate_fn, get_class_weights as combined_get_class_weights
 from dataset_cached import CachedCVSDataset, collate_fn as cached_collate_fn
@@ -29,6 +29,7 @@ from utils import (
     set_seed,
     setup_logging,
 )
+from losses import create_loss_function
 
 
 def train_epoch(
@@ -43,13 +44,17 @@ def train_epoch(
     logger,
     scaler: GradScaler = None,
 ) -> dict:
-    """Train for one epoch."""
+    """Train for one epoch with gradient accumulation support."""
     model.train()
 
     # Set backbone to eval mode only if fully frozen (no unfrozen layers)
     unfreeze_last_n = config["model"].get("unfreeze_last_n_layers", 0)
     if config["model"]["freeze_backbone"] and unfreeze_last_n == 0:
         model.backbone.eval()
+
+    # Gradient accumulation settings
+    accum_steps = config["training"].get("gradient_accumulation_steps", 1)
+    use_mixed_precision = config["training"].get("mixed_precision", False)
 
     loss_meter = AverageMeter()
     all_preds = []
@@ -64,69 +69,90 @@ def train_epoch(
         # Process videos
         pixel_values = model.process_videos(videos, device)
 
-        # Forward pass with optional mixed precision
-        optimizer.zero_grad()
+        # Determine if this is an accumulation step or optimizer step
+        is_accumulating = ((batch_idx + 1) % accum_steps != 0) and (batch_idx + 1 < len(train_loader))
 
-        if scaler is not None:
-            # Mixed precision training (for fp16 backbone fine-tuning)
+        # Forward pass with optional mixed precision
+        if use_mixed_precision or scaler is not None:
+            # Mixed precision training
             with autocast():
                 logits = model(pixel_values)
                 loss = criterion(logits, labels)
+                # Scale loss for gradient accumulation
+                loss = loss / accum_steps
 
             # Check for NaN loss and skip batch if detected
             if torch.isnan(loss) or torch.isinf(loss):
                 logger.warning(f"NaN/Inf loss detected at step {batch_idx}, skipping batch")
-                optimizer.zero_grad()
                 continue
 
-            # Scaled backward pass
-            scaler.scale(loss).backward()
+            # Scaled backward pass (gradients accumulate automatically)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-            # Unscale gradients for clipping
-            scaler.unscale_(optimizer)
+            # Only step optimizer after accumulation is complete
+            if not is_accumulating:
+                if scaler is not None:
+                    # Unscale gradients for clipping
+                    scaler.unscale_(optimizer)
 
-            # Gradient clipping
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
+                # Gradient clipping
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
 
-            # Check for NaN gradients (can happen if scaler scale is too high)
-            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-                logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping batch (scaler will adjust)")
-                scaler.update()  # Update scaler to reduce scale
+                # Check for NaN gradients
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping optimizer step")
+                    if scaler is not None:
+                        scaler.update()
+                    optimizer.zero_grad()
+                    continue
+
+                # Optimizer step
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+
                 optimizer.zero_grad()
-                continue
-
-            # Optimizer step with scaler
-            scaler.step(optimizer)
-            scaler.update()
+                scheduler.step()
         else:
-            # Standard training (frozen backbone)
+            # Standard training (frozen backbone, no mixed precision)
             logits = model(pixel_values)
             loss = criterion(logits, labels)
+            # Scale loss for gradient accumulation
+            loss = loss / accum_steps
 
             # Check for NaN loss and skip batch if detected
             if torch.isnan(loss) or torch.isinf(loss):
                 logger.warning(f"NaN/Inf loss detected at step {batch_idx}, skipping batch")
-                optimizer.zero_grad()
                 continue
 
-            # Backward pass
+            # Backward pass (gradients accumulate automatically)
             loss.backward()
 
-            # Gradient clipping (always apply for stability)
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
+            # Only step optimizer after accumulation is complete
+            if not is_accumulating:
+                # Gradient clipping
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip"])
 
-            # Check for NaN gradients
-            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-                logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping batch")
+                # Check for NaN gradients
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    logger.warning(f"NaN/Inf gradients at step {batch_idx}, skipping optimizer step")
+                    optimizer.zero_grad()
+                    continue
+
+                optimizer.step()
                 optimizer.zero_grad()
-                continue
+                scheduler.step()
 
-            optimizer.step()
+        # Restore unscaled loss for logging
+        loss_unscaled = loss.item() * accum_steps
 
-        scheduler.step()
-
-        # Update metrics
-        loss_meter.update(loss.item(), labels.size(0))
+        # Update metrics (use unscaled loss)
+        loss_meter.update(loss_unscaled, labels.size(0))
 
         # Store predictions
         with torch.no_grad():
@@ -368,15 +394,39 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
     logger.info(f"Train samples: {len(train_dataset)}")
     logger.info(f"Val samples: {len(val_dataset)}")
 
+    # Check if balanced sampling is enabled
+    sampling_config = config.get("sampling", {})
+    use_balanced_sampling = sampling_config.get("balanced", False)
+    sampling_strategy = sampling_config.get("strategy", "class_balanced")
+
     # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config["training"]["batch_size"],
-        shuffle=True,
-        num_workers=config["training"]["num_workers"],
-        collate_fn=collate_fn,
-        pin_memory=True,
-    )
+    if use_balanced_sampling:
+        # Use WeightedRandomSampler for balanced sampling
+        logger.info(f"Using balanced sampling with strategy: {sampling_strategy}")
+        sample_weights = endo_get_sample_weights(train_dataset, strategy=sampling_strategy)
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_dataset),
+            replacement=True  # With replacement to allow oversampling
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config["training"]["batch_size"],
+            sampler=sampler,  # Use sampler instead of shuffle
+            num_workers=config["training"]["num_workers"],
+            collate_fn=collate_fn,
+            pin_memory=True,
+        )
+    else:
+        # Standard random shuffle
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config["training"]["batch_size"],
+            shuffle=True,
+            num_workers=config["training"]["num_workers"],
+            collate_fn=collate_fn,
+            pin_memory=True,
+        )
 
     val_loader = DataLoader(
         val_dataset,
@@ -395,13 +445,15 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
     logger.info(f"Total parameters: {model.get_num_total_params() / 1e6:.1f}M")
     logger.info(f"Trainable parameters: {model.get_num_trainable_params() / 1e6:.1f}M")
 
-    # Loss function
-    if config["loss"]["use_class_weights"]:
-        pos_weight = torch.tensor(config["loss"]["pos_weight"]).to(device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        logger.info(f"Using class weights: {pos_weight}")
-    else:
-        criterion = nn.BCEWithLogitsLoss()
+    # Loss function (supports BCE, Focal, Asymmetric via config)
+    criterion = create_loss_function(config, device)
+    loss_type = config["loss"].get("type", "bce_with_logits")
+    logger.info(f"Loss function: {loss_type}")
+    if loss_type == "focal" or loss_type == "focal_with_pos_weight":
+        logger.info(f"  Focal alpha: {config['loss'].get('focal_alpha', 0.25)}")
+        logger.info(f"  Focal gamma: {config['loss'].get('focal_gamma', 2.0)}")
+    if config["loss"].get("use_class_weights") or config["loss"].get("pos_weight"):
+        logger.info(f"  Pos weights: {config['loss'].get('pos_weight', 'N/A')}")
 
     # Optimizer - with optional differential learning rates for backbone vs head
     backbone_lr = config["training"].get("backbone_lr", None)
@@ -443,9 +495,16 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
             weight_decay=config["training"]["weight_decay"],
         )
 
-    # Learning rate scheduler
-    num_training_steps = len(train_loader) * config["training"]["epochs"]
-    num_warmup_steps = len(train_loader) * config["training"]["warmup_epochs"]
+    # Learning rate scheduler (account for gradient accumulation)
+    accum_steps = config["training"].get("gradient_accumulation_steps", 1)
+    steps_per_epoch = len(train_loader) // accum_steps  # Actual optimizer steps per epoch
+    num_training_steps = steps_per_epoch * config["training"]["epochs"]
+    num_warmup_steps = steps_per_epoch * config["training"]["warmup_epochs"]
+
+    if accum_steps > 1:
+        logger.info(f"Gradient accumulation: {accum_steps} steps, effective batch size: {config['training']['batch_size'] * accum_steps}")
+        logger.info(f"Optimizer steps per epoch: {steps_per_epoch} (vs {len(train_loader)} batches)")
+
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=num_warmup_steps,
@@ -492,7 +551,10 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
     logger.info(f"Train samples: {len(train_dataset)}")
     logger.info(f"Val samples: {len(val_dataset)}")
     logger.info(f"Batch size: {config['training']['batch_size']}")
-    logger.info(f"Steps per epoch: {len(train_loader)}")
+    logger.info(f"Gradient accumulation: {accum_steps}")
+    logger.info(f"Effective batch size: {config['training']['batch_size'] * accum_steps}")
+    logger.info(f"Batches per epoch: {len(train_loader)}")
+    logger.info(f"Optimizer steps per epoch: {steps_per_epoch}")
     logger.info(f"Warmup steps: {num_warmup_steps}")
     logger.info(f"Total training steps: {num_training_steps}")
 
@@ -566,15 +628,15 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
         expected_train = 36694
         expected_val = 12372
         if len(train_dataset) == expected_train:
-            logger.info(f"✓ Train size matches expected Endoscapes size")
+            logger.info(f"[OK] Train size matches expected Endoscapes size")
         else:
-            logger.warning(f"⚠ Train size {len(train_dataset)} != expected {expected_train}")
+            logger.warning(f"[WARNING] Train size {len(train_dataset)} != expected {expected_train}")
         if len(val_dataset) == expected_val:
-            logger.info(f"✓ Val size matches expected Endoscapes size")
+            logger.info(f"[OK] Val size matches expected Endoscapes size")
         else:
-            logger.warning(f"⚠ Val size {len(val_dataset)} != expected {expected_val}")
+            logger.warning(f"[WARNING] Val size {len(val_dataset)} != expected {expected_val}")
     else:
-        logger.info(f"✓ Dataset size check passed (custom dataset)")
+        logger.info(f"[OK] Dataset size check passed (custom dataset)")
 
     unfreeze_last_n = config["model"].get("unfreeze_last_n_layers", 0)
     if config["model"]["freeze_backbone"] and unfreeze_last_n == 0:
@@ -645,17 +707,19 @@ def main(config_path: str = "config.yaml", quick_test: bool = False):
             logger.info("  - Train-Val mAP gap: < 20%")
             gap = train_metrics['mAP'] - val_metrics['mAP']
             if gap > 0.20:
-                logger.warning(f"⚠ Train-Val gap {gap*100:.1f}% > 20% - possible overfitting!")
+                logger.warning(f"[WARNING] Train-Val gap {gap*100:.1f}% > 20% - possible overfitting!")
             if val_metrics['mAP'] < 0.20:
-                logger.warning(f"⚠ Val mAP {val_metrics['mAP']*100:.1f}% < 20% - training may have issues!")
+                logger.warning(f"[WARNING] Val mAP {val_metrics['mAP']*100:.1f}% < 20% - training may have issues!")
             logger.info("="*60 + "\n")
 
-        # Save checkpoint
+        # Save checkpoint (includes all state needed for resuming)
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
             "best_metric": best_metric,
+            "best_epoch": best_epoch,
             "config": config,
         }
 

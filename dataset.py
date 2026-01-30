@@ -242,6 +242,79 @@ def get_class_weights(dataset: EndoscapesCVSDataset) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
+def get_sample_weights(dataset: EndoscapesCVSDataset, strategy: str = "class_balanced") -> torch.Tensor:
+    """
+    Compute per-sample weights for WeightedRandomSampler.
+
+    Args:
+        dataset: The dataset to compute weights for
+        strategy: Weighting strategy
+            - "class_balanced": Weight by inverse class frequency (averaged across classes)
+            - "any_positive": Oversample samples with any positive label
+            - "rare_combo": Oversample rare label combinations
+
+    Returns:
+        Tensor of sample weights (length = num_samples)
+    """
+    all_labels = np.array([s["labels"] for s in dataset.samples])
+    n_samples = len(all_labels)
+
+    if strategy == "class_balanced":
+        # For each sample, compute weight as average inverse frequency of its classes
+        weights = np.zeros(n_samples)
+
+        for i in range(3):  # For each class
+            pos_count = (all_labels[:, i] > 0).sum()
+            neg_count = (all_labels[:, i] == 0).sum()
+
+            # Inverse frequency weights
+            pos_weight = n_samples / (2 * pos_count + 1e-6)
+            neg_weight = n_samples / (2 * neg_count + 1e-6)
+
+            # Assign weights based on label
+            for j in range(n_samples):
+                if all_labels[j, i] > 0:
+                    weights[j] += pos_weight
+                else:
+                    weights[j] += neg_weight
+
+        # Average across classes
+        weights /= 3
+
+    elif strategy == "any_positive":
+        # Simple: oversample any sample with at least one positive
+        any_pos = all_labels.sum(axis=1) > 0
+        pos_count = any_pos.sum()
+        neg_count = n_samples - pos_count
+
+        # Balance positive vs negative
+        pos_weight = n_samples / (2 * pos_count + 1e-6)
+        neg_weight = n_samples / (2 * neg_count + 1e-6)
+
+        weights = np.where(any_pos, pos_weight, neg_weight)
+
+    elif strategy == "rare_combo":
+        # Weight by inverse frequency of label combination
+        combo_counts = {}
+        for label in all_labels:
+            key = tuple(label.astype(int))
+            combo_counts[key] = combo_counts.get(key, 0) + 1
+
+        weights = np.zeros(n_samples)
+        for j, label in enumerate(all_labels):
+            key = tuple(label.astype(int))
+            # Inverse frequency
+            weights[j] = n_samples / combo_counts[key]
+
+    else:
+        raise ValueError(f"Unknown sampling strategy: {strategy}")
+
+    # Normalize so weights sum to n_samples (not strictly necessary but good practice)
+    weights = weights / weights.sum() * n_samples
+
+    return torch.tensor(weights, dtype=torch.float64)
+
+
 if __name__ == "__main__":
     # Test the dataset
     from utils import load_config

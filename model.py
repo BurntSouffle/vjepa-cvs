@@ -359,37 +359,94 @@ class VJEPA_CVS(nn.Module):
 
         return logits
 
-    def process_videos(self, videos: list, device: torch.device) -> torch.Tensor:
+    def process_videos(self, videos, device: torch.device) -> torch.Tensor:
         """
-        Process raw videos - FAST version bypassing slow HuggingFace processor.
+        Process videos for V-JEPA input. Supports both raw and pre-processed inputs.
+
+        This method handles two input paths:
+        1. Raw numpy arrays: Full preprocessing (stack, permute, normalize)
+        2. Pre-processed tensors: Validation and device transfer only
 
         The HuggingFace AutoVideoProcessor takes ~18s per batch of 32 videos.
         This manual implementation takes ~1.3s (14x faster).
 
         Args:
-            videos: List of numpy arrays (T, H, W, C) uint8
+            videos: One of:
+                - List of numpy arrays (T, H, W, C) uint8 - raw frames
+                - torch.Tensor (B, T, C, H, W) float32 - pre-processed
+                - torch.Tensor (B, T, H, W, C) uint8 - raw tensor (will be processed)
             device: Target device
 
         Returns:
-            Processed tensor ready for forward pass (B, T, C, H, W)
+            Processed tensor ready for forward pass (B, T, C, H, W) float32, normalized
         """
         import numpy as np
 
-        # Stack into tensor: (B, T, H, W, C)
-        video_tensor = torch.from_numpy(np.stack(videos))
+        # Path 1: Already a tensor
+        if isinstance(videos, torch.Tensor):
+            video_tensor = videos
 
-        # Permute to (B, T, C, H, W) - V-JEPA expected format
-        video_tensor = video_tensor.permute(0, 1, 4, 2, 3).contiguous()
+            # Check if already in correct format (B, T, C, H, W) and normalized
+            if video_tensor.dim() == 5:
+                B, T, dim3, H, W = video_tensor.shape
 
-        # Move to device and convert to float [0, 1]
-        video_tensor = video_tensor.to(device).float() / 255.0
+                # Case 1a: (B, T, C, H, W) with C=3 - likely pre-processed
+                if dim3 == 3 and video_tensor.dtype == torch.float32:
+                    # Check if already normalized (values outside [0,1] range)
+                    if video_tensor.min() < -0.5 or video_tensor.max() > 1.5:
+                        # Already normalized, just move to device
+                        return video_tensor.to(device)
+                    else:
+                        # In [0,1] range, needs normalization
+                        video_tensor = video_tensor.to(device)
+                        mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 1, 3, 1, 1)
+                        std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 1, 3, 1, 1)
+                        return (video_tensor - mean) / std
 
-        # Apply ImageNet normalization (same as V-JEPA processor)
-        mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 1, 3, 1, 1)
-        video_tensor = (video_tensor - mean) / std
+                # Case 1b: (B, T, H, W, C) - raw tensor, needs permute and normalize
+                elif W == 3:  # Last dim is channels
+                    video_tensor = video_tensor.permute(0, 1, 4, 2, 3).contiguous()
+                    video_tensor = video_tensor.to(device).float() / 255.0
+                    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 1, 3, 1, 1)
+                    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 1, 3, 1, 1)
+                    return (video_tensor - mean) / std
 
-        return video_tensor
+            raise ValueError(f"Unexpected tensor shape: {video_tensor.shape}. "
+                           f"Expected (B, T, C, H, W) or (B, T, H, W, C)")
+
+        # Path 2: List of numpy arrays (original path)
+        elif isinstance(videos, list):
+            # Check if list contains numpy arrays or tensors
+            if len(videos) == 0:
+                raise ValueError("Empty video list")
+
+            first = videos[0]
+
+            if isinstance(first, np.ndarray):
+                # Stack numpy arrays: (B, T, H, W, C)
+                video_tensor = torch.from_numpy(np.stack(videos))
+            elif isinstance(first, torch.Tensor):
+                # Stack tensors
+                video_tensor = torch.stack(videos)
+            else:
+                raise ValueError(f"Unsupported video type in list: {type(first)}")
+
+            # Permute to (B, T, C, H, W) - V-JEPA expected format
+            video_tensor = video_tensor.permute(0, 1, 4, 2, 3).contiguous()
+
+            # Move to device and convert to float [0, 1]
+            video_tensor = video_tensor.to(device).float() / 255.0
+
+            # Apply ImageNet normalization (same as V-JEPA processor)
+            mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 1, 3, 1, 1)
+            video_tensor = (video_tensor - mean) / std
+
+            return video_tensor
+
+        else:
+            raise ValueError(f"Unsupported videos type: {type(videos)}. "
+                           f"Expected list of numpy arrays or torch.Tensor")
 
     def get_num_trainable_params(self) -> int:
         """Get number of trainable parameters."""
