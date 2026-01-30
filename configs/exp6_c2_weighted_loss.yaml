@@ -1,0 +1,99 @@
+# Experiment 6: C2-Weighted Loss
+# ===============================
+# Purpose: Fix C2 detection failure by heavily weighting C2 positive samples
+# Based on: exp2_local_attention.yaml (best baseline)
+#
+# Key finding from criterion comparison:
+#   - C2-only samples: 0/5 correct (model always predicts C1 > C2)
+#   - C2 is rarest class (8.55x imbalance)
+#   - Model conflates C2 (cystic plate) with C1 (hepatocystic triangle)
+#
+# Solution: Use pos_weight to heavily penalize missing C2 positives
+#   - pos_weight: [1.0, 5.0, 1.0] = 5x penalty for C2 false negatives
+#   - Alternative: [1.0, 10.0, 1.0] if 5x is not enough
+
+# Paths (Windows local)
+data:
+  endoscapes_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/endoscapes"
+  sages_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/sages_cvs_challenge_2025_r1"
+  metadata_csv: "all_metadata.csv"
+  train_vids: "train_vids.txt"
+  val_vids: "val_vids.txt"
+  test_vids: "test_vids.txt"
+  results_dir: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/vjepa/results/exp6_c2_weighted_loss"
+  dataset_type: "endoscapes"
+
+# Model - Same as exp2 (frozen backbone + attention pooling)
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  freeze_backbone: true
+  unfreeze_last_n_layers: 0
+  hidden_dim: 1024
+  classifier_hidden: 512
+  num_classes: 3
+  dropout: 0.5
+  pooling_type: "attention"
+  head_type: "mlp"
+  attention_heads: 8
+  attention_dropout: 0.1
+
+# Data loading - Same as exp2
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  augment_train: true
+  horizontal_flip_prob: 0.5
+  sages_val_ratio: 0.2
+
+# Training - Same as exp2
+training:
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  num_workers: 4
+  mixed_precision: true
+  epochs: 15
+  optimizer: "adamw"
+  learning_rate: 5.0e-4
+  weight_decay: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 2
+  min_lr: 1.0e-6
+  early_stopping: true
+  patience: 5
+  early_stopping_metric: "mAP"
+  grad_clip: 1.0
+
+# Loss - KEY CHANGE: C2-weighted pos_weight
+loss:
+  type: "bce_with_logits"
+  use_class_weights: false
+  # pos_weight penalizes false negatives for each class
+  # C2 (cystic plate) needs 5x weight because:
+  #   1. It's the rarest positive class (8.55x imbalance)
+  #   2. Model completely fails to detect C2-only samples (0% accuracy)
+  #   3. Model conflates C2 with C1
+  pos_weight: [1.0, 5.0, 1.0]  # [C1, C2, C3] - 5x penalty for missing C2
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "balanced_accuracy", "f1"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 10
+  save_every_n_epochs: 1
+
+# Reproducibility
+seed: 42
+
+# Experiment metadata
+experiment:
+  name: "exp6_c2_weighted_loss"
+  description: "Fix C2 blindness with 5x pos_weight for C2 class"
+  hypothesis: "Higher penalty for C2 false negatives will force the model to learn C2-specific features"
+  baseline: "exp2_local_attention (49.79% mAP)"
+  key_change: "pos_weight: [1.0, 5.0, 1.0]"
+  gpu: "RTX 3080 12GB"
+  effective_batch_size: 32

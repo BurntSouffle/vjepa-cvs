@@ -1,0 +1,105 @@
+# Experiment 5: Attention Pooling + Focal Loss + Balanced Sampling
+# ================================================================
+# Purpose: Test if combining focal loss AND balanced sampling beats either alone
+# Target: RTX 3080 12GB (Windows)
+#
+# Combines:
+#   - Attention pooling (from exp2)
+#   - Focal loss gamma=2.0 (from exp3)
+#   - Balanced sampling class_balanced (from exp4)
+#
+# Rationale:
+#   - Focal loss: Down-weights easy negatives, focuses on hard examples
+#   - Balanced sampling: Ensures model sees positive examples more often
+#   - Together: Should provide complementary benefits for severe imbalance
+#
+# Hypothesis: Combined approach will outperform exp2 (baseline), exp3 (focal only),
+# and exp4 (balanced only) on mAP, especially for rare C2 class.
+
+# Paths (Windows local)
+data:
+  endoscapes_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/endoscapes"
+  sages_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/sages_cvs_challenge_2025_r1"
+  metadata_csv: "all_metadata.csv"
+  train_vids: "train_vids.txt"
+  val_vids: "val_vids.txt"
+  test_vids: "test_vids.txt"
+  results_dir: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/vjepa/results/exp5_focal_balanced"
+  dataset_type: "endoscapes"
+
+# Model - Attention pooling (same as exp2/3/4)
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  freeze_backbone: true
+  unfreeze_last_n_layers: 0
+  hidden_dim: 1024
+  classifier_hidden: 512
+  num_classes: 3
+  dropout: 0.5
+  pooling_type: "attention"
+  head_type: "mlp"
+  attention_heads: 8
+  attention_dropout: 0.1
+
+# Data loading
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  augment_train: true
+  horizontal_flip_prob: 0.5
+  sages_val_ratio: 0.2
+
+# Balanced Sampling (from exp4)
+sampling:
+  balanced: true
+  strategy: "class_balanced"
+
+# Training
+training:
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  num_workers: 4
+  mixed_precision: true
+  epochs: 15
+  optimizer: "adamw"
+  learning_rate: 5.0e-4
+  weight_decay: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 2
+  min_lr: 1.0e-6
+  early_stopping: true
+  patience: 5
+  grad_clip: 1.0
+
+# Focal Loss (from exp3)
+loss:
+  type: "focal"
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "balanced_accuracy", "f1"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 10
+  save_every_n_epochs: 1
+
+# Reproducibility
+seed: 42
+
+# Experiment metadata
+experiment:
+  name: "exp5_focal_balanced"
+  description: "Frozen V-JEPA + attention pooling + focal loss + balanced sampling"
+  hypothesis: "Combining focal loss and balanced sampling provides complementary benefits"
+  baseline: "exp2_local_attention"
+  comparisons:
+    - "exp3_focal_loss (focal only)"
+    - "exp4_balanced_sampling (balanced only)"
+  changes:
+    - "Loss: BCE -> Focal Loss (gamma=2.0, alpha=0.25)"
+    - "Sampling: Random -> WeightedRandomSampler (class_balanced)"

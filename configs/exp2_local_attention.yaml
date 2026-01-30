@@ -1,0 +1,105 @@
+# Experiment 2 Local: Attention Pooling on RTX 3080 12GB
+# ======================================================
+# Purpose: Train attention pooling model locally for attention visualization
+# Target: RTX 3080 12GB (Windows)
+#
+# Configuration:
+#   - Dataset: Endoscapes only (for faster iteration)
+#   - Model: ViT-L frozen backbone
+#   - Pooling: Attention (learnable) - 8 heads
+#   - Head: MLP
+#   - Mixed precision: fp16 for memory efficiency
+#
+# Memory optimizations:
+#   - batch_size: 2 (fits in 12GB VRAM)
+#   - gradient_accumulation_steps: 16 (effective batch = 32)
+#   - num_workers: 2 (reduce CPU memory)
+#   - Mixed precision enabled
+
+# Paths (Windows local) - ABSOLUTE paths to avoid confusion
+data:
+  endoscapes_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/endoscapes"
+  sages_root: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/sages_cvs_challenge_2025_r1"
+  metadata_csv: "all_metadata.csv"
+  train_vids: "train_vids.txt"
+  val_vids: "val_vids.txt"
+  test_vids: "test_vids.txt"
+  results_dir: "C:/Users/sufia/Documents/Uni/Masters/DISSERTATION/vjepa/results/exp2_local_attention"
+  dataset_type: "endoscapes"  # Use endoscapes only for faster local training
+
+# Model - Frozen backbone + Attention pooling
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  freeze_backbone: true           # Keep backbone frozen (memory efficient)
+  unfreeze_last_n_layers: 0       # No fine-tuning
+  hidden_dim: 1024
+  classifier_hidden: 512
+  num_classes: 3
+  dropout: 0.5
+  # Attention pooling settings
+  pooling_type: "attention"       # Learnable attention pooling
+  head_type: "mlp"
+  attention_heads: 8
+  attention_dropout: 0.1
+
+# Data loading
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  augment_train: true
+  horizontal_flip_prob: 0.5
+  sages_val_ratio: 0.2
+
+# Training - RTX 3080 12GB optimized
+training:
+  # Memory-efficient settings (larger batch = fewer steps = faster)
+  batch_size: 32                  # Full batch - no accumulation needed!
+  gradient_accumulation_steps: 1  # Effective batch = 32 (matches original)
+  num_workers: 4                  # More data loading parallelism
+  mixed_precision: true           # fp16 for memory savings
+
+  # Training schedule
+  epochs: 15                      # Reduced for local training
+  optimizer: "adamw"
+  learning_rate: 5.0e-4           # Same as original
+  weight_decay: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 2                # Reduced proportionally (was 5 for 50 epochs)
+  min_lr: 1.0e-6
+
+  # Early stopping on val_mAP
+  early_stopping: true
+  patience: 5                     # Stop if no improvement for 5 epochs
+  early_stopping_metric: "mAP"    # Monitor validation mAP
+
+  grad_clip: 1.0
+
+# Loss
+loss:
+  type: "bce_with_logits"
+  use_class_weights: false
+  pos_weight: [1.0, 1.0, 1.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "balanced_accuracy", "f1"]
+  threshold: 0.5
+
+# Logging - Save every epoch to avoid losing progress
+logging:
+  log_every_n_steps: 10
+  save_every_n_epochs: 1          # Save EVERY epoch (don't lose checkpoints!)
+
+# Reproducibility
+seed: 42
+
+# Experiment metadata
+experiment:
+  name: "exp2_local_attention"
+  description: "Local RTX 3080 training: Frozen V-JEPA + attention pooling + MLP head"
+  hypothesis: "Attention pooling learns which tokens are most informative for CVS"
+  gpu: "RTX 3080 12GB"
+  effective_batch_size: 32
+  max_epochs: 15
+  early_stopping_patience: 5
