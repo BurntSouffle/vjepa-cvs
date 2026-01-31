@@ -425,6 +425,8 @@ def main(config_path: str = "configs/exp8_finetune_multitask.yaml"):
         augment=config["dataset"]["augment_train"],
         horizontal_flip_prob=config["dataset"]["horizontal_flip_prob"],
         use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
+        gt_masks_dir=config["data"].get("gt_masks_dir"),
+        synthetic_masks_dir=config["data"].get("synthetic_masks_dir"),
     )
 
     val_dataset = MultiTaskCVSDataset(
@@ -436,6 +438,8 @@ def main(config_path: str = "configs/exp8_finetune_multitask.yaml"):
         mask_resolution=config["dataset"].get("mask_resolution", 64),
         augment=False,
         use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
+        gt_masks_dir=config["data"].get("gt_masks_dir"),
+        synthetic_masks_dir=config["data"].get("synthetic_masks_dir"),
     )
 
     logger.info(f"Train: {len(train_dataset)} clips, {train_dataset.clips_with_masks} with masks")
