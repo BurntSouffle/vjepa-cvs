@@ -1,0 +1,118 @@
+# Experiment 9: Staged Fine-Tuning
+# =================================
+# Two-stage approach to avoid destroying V-JEPA's pretrained representations
+#
+# Motivation: Exp8 showed that fine-tuning 2 layers didn't improve internal attention
+# and may have slightly degraded it (98.2% entropy vs 95% baseline).
+#
+# Strategy:
+#   Stage 1: Train heads only (backbone frozen) - let heads learn to use V-JEPA features
+#   Stage 2: Minimal backbone fine-tuning - very conservative unfreezing
+#
+# Key differences from Exp8:
+#   - Stage 1 with frozen backbone first (Exp8 unfroze immediately)
+#   - Only 1 layer unfrozen in Stage 2 (Exp8 used 2)
+#   - 20x lower backbone LR: 1e-6 vs 1e-5
+#   - Lower seg_weight: 0.3 vs 0.5
+#   - Aggressive data augmentation to prevent overfitting
+
+experiment:
+  name: "exp9_staged_finetune"
+  description: "Two-stage fine-tuning: heads first, then minimal backbone"
+  hypothesis: >
+    By training heads first with frozen backbone, we let them learn to properly
+    use V-JEPA's features before any backbone modification. Then minimal fine-tuning
+    with very low LR should preserve representations while adapting to surgical domain.
+  baseline: "exp8_finetune_multitask (48.03% mAP after 2 epochs)"
+
+# Stage 1: Train heads only (freeze backbone completely)
+stage1:
+  epochs: 10
+  unfreeze_layers: 0          # Completely frozen backbone
+  head_lr: 5.0e-4             # Standard LR for new heads
+  batch_size: 32              # Can use larger batch with frozen backbone
+  gradient_accumulation: 4    # Effective batch = 128
+  early_stopping_patience: 5
+  warmup_epochs: 1
+  description: "Train CVS + Seg heads with frozen V-JEPA backbone"
+
+# Stage 2: Minimal backbone fine-tuning
+stage2:
+  epochs: 5                   # Short fine-tuning phase
+  unfreeze_layers: 1          # Only last 1 layer (Exp8 used 2)
+  backbone_lr: 1.0e-6         # 20x lower than Exp8's 1e-5
+  head_lr: 1.0e-5             # Also reduce head LR for stability
+  batch_size: 16              # Smaller batch for fine-tuning
+  gradient_accumulation: 8    # Effective batch = 128
+  early_stopping_patience: 3  # Stop fast if overfitting
+  warmup_epochs: 0            # No warmup - already trained
+  description: "Minimal backbone adaptation with very low LR"
+
+# Shared data settings
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results/exp9_staged_finetune"
+
+# Model configuration
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  hidden_dim: 1024
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+  num_seg_classes: 5
+  seg_output_size: 64
+  seg_dropout: 0.1
+
+# Dataset configuration
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  mask_resolution: 64
+  use_synthetic_masks: true
+
+# Aggressive data augmentation (new for Exp9)
+augmentation:
+  horizontal_flip_prob: 0.5
+  rotation_degrees: 15        # Random rotation +/- 15 degrees
+  color_jitter:
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.2
+    hue: 0.1
+  random_erasing_prob: 0.2    # Randomly erase patches
+  gaussian_blur_prob: 0.1     # Occasional blur
+  gaussian_blur_sigma: [0.1, 2.0]
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3             # Lower than Exp8 (was 0.5) - focus on CVS
+  cvs_pos_weight: [1.0, 3.0, 1.0]  # C2 upweighting
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]
+
+# Training settings
+training:
+  num_workers: 8
+  mixed_precision: true
+  grad_clip: 1.0
+  weight_decay: 0.05
+  scheduler: "cosine"
+  min_lr: 1.0e-7
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "balanced_accuracy"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_checkpoints: true
+
+# Reproducibility
+seed: 42
