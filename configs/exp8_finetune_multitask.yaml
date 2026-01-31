@@ -23,7 +23,17 @@
 
 # Paths (RunPod)
 data:
-  endoscapes_root: "/workspace/data/endoscapes"
+  # Main data directories
+  frames_dir: "/workspace/vjepa/data/endoscapes"
+  train_frames: "/workspace/vjepa/data/endoscapes/train"
+  val_frames: "/workspace/vjepa/data/endoscapes/val"
+
+  # Mask directories
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  # Synthetic masks are in: synthetic_masks/{split}/semantic/{vid}_{frame}.png
+
+  # Results
   results_dir: "/workspace/results/exp8_finetune_multitask"
 
 # Model configuration

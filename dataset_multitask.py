@@ -63,6 +63,8 @@ class MultiTaskCVSDataset(Dataset):
         horizontal_flip_prob: float = 0.5,
         use_synthetic_masks: bool = True,
         include_gallbladder: bool = False,  # Whether to include gallbladder as class 5
+        gt_masks_dir: Optional[str] = None,  # Override GT masks directory
+        synthetic_masks_dir: Optional[str] = None,  # Override synthetic masks directory
     ):
         """
         Args:
@@ -76,6 +78,8 @@ class MultiTaskCVSDataset(Dataset):
             horizontal_flip_prob: Probability of horizontal flip
             use_synthetic_masks: Whether to use SAM2 synthetic masks as fallback
             include_gallbladder: Whether to keep gallbladder as separate class
+            gt_masks_dir: Override for GT masks directory (default: root_dir/semseg)
+            synthetic_masks_dir: Override for synthetic masks directory (default: root_dir/synthetic_masks)
         """
         self.root_dir = Path(root_dir)
         self.split = split
@@ -93,10 +97,10 @@ class MultiTaskCVSDataset(Dataset):
             self.CLASS_MAP[5] = 5
             self.NUM_SEG_CLASSES = 6
 
-        # Paths
+        # Paths - allow override for RunPod or other environments
         self.frame_dir = self.root_dir / split
-        self.semseg_dir = self.root_dir / "semseg"
-        self.synthetic_dir = self.root_dir / "synthetic_masks"
+        self.semseg_dir = Path(gt_masks_dir) if gt_masks_dir else self.root_dir / "semseg"
+        self.synthetic_dir = Path(synthetic_masks_dir) if synthetic_masks_dir else self.root_dir / "synthetic_masks"
 
         # Load metadata
         metadata_path = self.root_dir / "all_metadata.csv"
@@ -136,8 +140,10 @@ class MultiTaskCVSDataset(Dataset):
                 self.gt_masks.add(f.stem)
 
         # Synthetic mask index
+        # Synthetic masks are in: synthetic_masks/{split}/semantic/{vid}_{frame}.png
         self.synthetic_masks = set()
         if self.use_synthetic_masks and self.synthetic_dir.exists():
+            # Check current split first, then others for completeness
             for split_dir in ["train", "val"]:
                 sem_dir = self.synthetic_dir / split_dir / "semantic"
                 if sem_dir.exists():
@@ -229,15 +235,24 @@ class MultiTaskCVSDataset(Dataset):
         return np.array(img, dtype=np.uint8)
 
     def _load_mask(self, video_id: int, frame_num: int, mask_type: str) -> Optional[np.ndarray]:
-        """Load segmentation mask."""
+        """Load segmentation mask.
+
+        Priority:
+        1. GT masks: {gt_masks_dir}/{vid}_{frame}.png
+        2. Synthetic masks: {synthetic_masks_dir}/{split}/semantic/{vid}_{frame}.png
+        """
         mask_name = f"{video_id}_{frame_num}.png"
 
         if mask_type == "gt":
+            # GT masks are directly in semseg_dir
             mask_path = self.semseg_dir / mask_name
         else:
-            # Try both train and val synthetic dirs
+            # Synthetic masks: check current split first, then others
+            # Path structure: synthetic_masks/{split}/semantic/{vid}_{frame}.png
             mask_path = None
-            for split_dir in ["train", "val"]:
+            # Check current split first
+            splits_to_check = [self.split] + [s for s in ["train", "val"] if s != self.split]
+            for split_dir in splits_to_check:
                 candidate = self.synthetic_dir / split_dir / "semantic" / mask_name
                 if candidate.exists():
                     mask_path = candidate
@@ -378,13 +393,26 @@ if __name__ == "__main__":
     print("Testing MultiTaskCVSDataset")
     print("=" * 60)
 
+    # Local testing (Windows)
+    # dataset = MultiTaskCVSDataset(
+    #     root_dir=r"C:\Users\sufia\Documents\Uni\Masters\DISSERTATION\endoscapes",
+    #     split="train",
+    #     num_frames=16,
+    #     resolution=256,
+    #     mask_resolution=64,
+    #     use_synthetic_masks=True,
+    # )
+
+    # RunPod configuration
     dataset = MultiTaskCVSDataset(
-        root_dir=r"C:\Users\sufia\Documents\Uni\Masters\DISSERTATION\endoscapes",
+        root_dir="/workspace/vjepa/data/endoscapes",
         split="train",
         num_frames=16,
         resolution=256,
         mask_resolution=64,
         use_synthetic_masks=True,
+        gt_masks_dir="/workspace/vjepa/data/endoscapes/semseg",
+        synthetic_masks_dir="/workspace/vjepa/data/synthetic_masks",
     )
 
     print(f"\nDataset size: {len(dataset)}")
