@@ -269,10 +269,11 @@ C2-weighted loss did **NOT** improve overall performance:
 | Backbone | V-JEPA 2 ViT-L (last 2 layers unfrozen) |
 | CVS Head | Attention pooling + MLP |
 | Seg Head | Lightweight decoder (5 classes) |
-| Loss | CVS BCE + Seg CE (weighted) |
-| Batch Size | 16 (effective 32) |
+| Loss | CVS BCE + Seg CE (weighted 0.5) |
+| Batch Size | 16 (effective 32 with grad accum) |
 | Backbone LR | 1e-5 |
 | Head LR | 5e-4 |
+| Platform | RunPod A100 80GB |
 
 ### Hypothesis
 Joint segmentation learning provides explicit anatomical supervision that:
@@ -281,28 +282,154 @@ Joint segmentation learning provides explicit anatomical supervision that:
 3. **Creates better features** through multi-task regularization
 
 ### Motivation
-- 51.2% of training clips have mask supervision (18,792 clips)
+- 51.2% of training clips have mask supervision
 - Segmentation classes directly map to CVS criteria:
   - Class 1: Cystic Plate → C2 criterion
   - Class 2: Calot Triangle → C1 criterion
   - Classes 3,4: Cystic Artery/Duct → C3 criterion
 - Loss weighting (Exp6) failed → need feature-level improvement
 
-### Key Design Decisions
-1. **Last 2 layers unfrozen**: Balance between adaptation and preserving V-JEPA features
-2. **Differential LR**: 1e-5 for backbone (careful), 5e-4 for heads (fast)
-3. **Lightweight seg decoder**: Minimize overhead, leverage V-JEPA features
-4. **Seg weight 0.5**: Auxiliary task, don't overpower CVS objective
-
 ### Status
-READY FOR TESTING
+COMPLETED - **NEGATIVE RESULT**
+
+### Results
+| Epoch | Train mAP | Val mAP | Seg mIoU | Train-Val Gap |
+|-------|-----------|---------|----------|---------------|
+| 1 | 33.35% | 46.71% | 27.28% | -13.4% |
+| 2 | 67.12% | **48.03%** | 29.72% | +19.1% |
+| 3 | 77.89% | 45.12% | 30.21% | +32.8% |
+| 4 | 85.07% | 40.55% | 30.69% | +44.5% |
+
+**Best Result:** 48.03% Val mAP (Epoch 2) - **WORSE than baseline (49.79%)**
+
+### KEY FINDING: V-JEPA Internal Attention Did NOT Change
+
+Extracted internal attention from the fine-tuned backbone and measured entropy:
+
+| Component | Before Fine-tuning | After Fine-tuning |
+|-----------|-------------------|-------------------|
+| V-JEPA Internal Attention | ~95% entropy (uniform) | **98.2% entropy (MORE uniform!)** |
+| Attention Pooler | - | 75.6% entropy (somewhat focused) |
+
+**Critical Insight:** Fine-tuning 2 layers for 2 epochs did NOT make V-JEPA attend to surgical anatomy. The backbone still has nearly uniform attention - actually slightly worse than baseline!
+
+### Segmentation Head Analysis
+
+Visual analysis of segmentation predictions (see `visualizations/exp8_segmentation_check.png`):
+
+1. **Seg head learned to predict anatomy** - predictions overlap with GT regions
+2. **Over-segmentation** - model marks more classes than GT
+3. **CVS head failing** - predictions biased toward 0 even for positive samples
+4. **The seg decoder extracts anatomy from distributed features, not focused attention**
+
+Sample CVS predictions on positive samples:
+| Sample | GT Labels | CVS Predictions | Correct? |
+|--------|-----------|-----------------|----------|
+| Vid 123 | C2=1 | C2=0.14 | No |
+| Vid 126 | C1=1, C2=1 | C1=0.10, C2=0.03 | No |
+| Vid 127 | C1=1 | C1=0.03 | No |
+| Vid 130 | C3=1 | C3=0.62 | Yes |
+
+### Analysis
+
+**Why it failed:**
+1. **Rapid overfitting** - 85% train vs 41% val by epoch 4
+2. **V-JEPA's internal attention unchanged** - backbone didn't learn to focus on anatomy
+3. **Seg head works independently** - decodes anatomy from uniform features
+4. **CVS head doesn't benefit** - still relies on unfocused representations
+5. **Fine-tuning too aggressive** - 2 layers + 1e-5 LR caused overfitting before learning
+
+**Lessons Learned:**
+1. Fine-tuning V-JEPA backbone doesn't automatically improve attention focus
+2. The segmentation decoder can extract structure from uniform features
+3. But this doesn't transfer to better classification
+4. Need more conservative fine-tuning approach (→ Exp9)
 
 ### Files
 - `dataset_multitask.py` - Dataset with mask loading
 - `model_multitask.py` - V-JEPA + CVS head + Seg decoder
 - `train_multitask.py` - Multi-task training loop
-- `configs/exp8_finetune_multitask.yaml` - RunPod A100 config
-- `configs/exp8_finetune_multitask_local.yaml` - Local RTX 3080 config
+- `visualize_exp8_anatomy.py` - Segmentation visualization
+- `visualize_exp8_internal_attention.py` - Attention entropy analysis
+
+### Checkpoint
+`results/exp8_finetune_multitask/run_20260131_114120/best_model.pt`
+
+---
+
+## Experiment 9: Staged Fine-Tuning (PLANNED)
+
+### Hypothesis
+Based on Exp8 findings and dermatology ViT paper (fine-tuning on small datasets):
+- **Stage 1**: Train heads first while backbone is completely frozen
+- **Stage 2**: Then fine-tune backbone minimally (1 layer, very low LR)
+
+This prevents overfitting by letting heads adapt to V-JEPA features before any backbone modification.
+
+### Motivation
+Exp8 showed:
+- Fine-tuning 2 layers immediately caused overfitting (85% train vs 41% val)
+- V-JEPA's internal attention didn't become more focused (98% entropy)
+- The problem: heads and backbone were learning simultaneously
+
+Staged approach rationale:
+1. Stage 1 lets heads learn optimal use of frozen V-JEPA features
+2. Stage 2 then makes minimal backbone adjustments to support those heads
+3. Much lower LR prevents catastrophic forgetting of pretrained representations
+
+### Configuration
+
+**Stage 1 (Heads Only):**
+| Parameter | Value |
+|-----------|-------|
+| Backbone | Completely frozen (0 layers) |
+| Epochs | 10 |
+| Head LR | 5e-4 |
+| Batch Size | 32 (effective 128) |
+| Early Stopping | 5 epochs patience |
+
+**Stage 2 (Minimal Backbone):**
+| Parameter | Value |
+|-----------|-------|
+| Backbone | Last 1 layer unfrozen (not 2) |
+| Epochs | 5 (max) |
+| Backbone LR | 1e-6 (20x lower than Exp8) |
+| Head LR | 1e-5 (reduced) |
+| Batch Size | 16 (effective 128) |
+| Early Stopping | 3 epochs patience |
+
+### Key Differences from Exp8
+| Setting | Exp8 | Exp9 |
+|---------|------|------|
+| Staging | None (immediate unfreeze) | 2-stage |
+| Unfrozen layers | 2 | 0 → 1 |
+| Backbone LR | 1e-5 | 1e-6 (20x lower) |
+| seg_weight | 0.5 | 0.3 (focus on CVS) |
+| Augmentation | Flip only | Rotation, color jitter, erasing, blur |
+
+### New Augmentations
+- Random rotation: ±15 degrees
+- Color jitter: brightness 0.3, contrast 0.3, saturation 0.2, hue 0.1
+- Random erasing: 20% probability
+- Gaussian blur: 10% probability
+
+### Expected Outcome
+- Stage 1 should match or beat Exp2 baseline (49.79%)
+- Stage 2 should add small improvement without overfitting
+- **Target: >52% mAP**
+
+### Files
+- `configs/exp9_staged_finetune.yaml` - Experiment config
+- `train_staged.py` - Two-stage training script
+
+### Status
+READY FOR TESTING
+
+### To Run
+```bash
+cd /workspace/vjepa
+python train_staged.py --config configs/exp9_staged_finetune.yaml
+```
 
 ---
 
@@ -323,58 +450,74 @@ Training set imbalance:
 
 ## Summary Table
 
-| Experiment | Loss | Sampling | Best Val mAP | Notes |
-|------------|------|----------|--------------|-------|
-| **Exp2** | BCE | Random | **49.79%** | **BEST** - Baseline winner |
-| Exp3 | Focal | Random | 24.98% | WORSE - focal loss too aggressive |
-| Exp4 | BCE | Balanced | 46.90% | WORSE - distribution mismatch |
-| Exp5 | Focal | Balanced | - | Skipped (both components failed) |
-| Exp6 | BCE (C2 5x) | Random | 49.79% | SAME - loss weighting doesn't fix features |
-| **Exp8** | BCE + Seg CE | Random | PENDING | Multi-task with segmentation |
+| Exp | Approach | Best Val mAP | Notes |
+|-----|----------|--------------|-------|
+| **2** | Attention pooling (frozen) | **49.79%** | **BASELINE** - Best so far |
+| 3 | Focal loss | 24.98% | Much worse |
+| 4 | Balanced sampling | 46.90% | Distribution mismatch |
+| 5 | Focal + Balanced | - | Skipped |
+| 6 | C2-weighted loss | 49.79% | No improvement |
+| 8 | Multi-task fine-tune (2 layers) | 48.03% | Overfit, V-JEPA unchanged |
+| **9** | Staged fine-tune | **TBD** | Next experiment |
 
 ## Conclusions
 
-1. **Winner: Exp2 (BCE + Random Sampling)** with 49.79% Val mAP
+1. **Current Best: Exp2 (Frozen backbone + Attention pooling)** with 49.79% Val mAP
 2. **Focal loss hurts performance** - down-weighting easy negatives was counterproductive
 3. **Balanced sampling hurts performance** - causes train/val distribution mismatch
 4. **Simple BCE with random sampling is best** for this moderate imbalance (~5-8x)
 5. **Overfitting is the main challenge** - all experiments showed train-val gap widening
-6. **Attention mechanism works** - focuses on anatomically relevant regions, correlates with confidence
-7. **Partial CVS is the bottleneck** - model struggles to distinguish C1-only from full CVS
-8. **C2 DETECTION IS BROKEN** - Model never correctly identifies C2-only samples (0/5 accuracy)
-9. **C1 prediction bias** - Model defaults to C1 predictions even when C2 or C3 is the only positive
-10. **Loss weighting alone cannot fix C2** - Exp6 showed 5x C2 weight doesn't improve features
+6. **V-JEPA's internal attention is UNIFORM** - ~95-98% entropy, doesn't focus on anatomy
+7. **Fine-tuning doesn't fix attention** - Exp8 showed 2 layers unfrozen → still uniform
+8. **Seg head can extract anatomy** - but from distributed features, not focused attention
+9. **CVS head doesn't benefit from seg head** - multi-task didn't improve classification
+10. **C2 DETECTION IS BROKEN** - Model never correctly identifies C2-only samples
+11. **Need more conservative fine-tuning** - staged approach (Exp9) may prevent overfitting
 
 ## Root Cause Analysis
 
-The ~50% mAP ceiling is primarily explained by **C2 blindness**:
+The ~50% mAP ceiling is explained by multiple factors:
+
+### 1. V-JEPA's Uniform Internal Attention
+- V-JEPA's internal attention has ~95-98% entropy (nearly uniform)
+- Fine-tuning 2 layers did NOT change this (Exp8)
+- The backbone treats all spatial patches roughly equally
+- It doesn't "see" surgical anatomy differently from background
+
+### 2. C2 Blindness
 - C2 (cystic plate) is the rarest class (8.55x imbalance)
 - Model conflates C2 with C1 (predicts C1 > C2 for all C2-only samples)
-- V-JEPA features don't distinguish C2 from C1 (uniform internal attention)
-- **Loss weighting (Exp6) confirmed**: The problem is feature-level, not loss-level
-- This single failure mode likely accounts for 10-15% of the mAP gap
+- Loss weighting (Exp6) confirmed: The problem is feature-level, not loss-level
+
+### 3. Overfitting
+- All fine-tuning experiments showed rapid overfitting
+- Exp8: 85% train vs 41% val by epoch 4
+- The model memorizes training data instead of learning generalizable features
+
+### 4. Feature-Classification Gap
+- Seg decoder CAN extract anatomy from V-JEPA features
+- But CVS head CANNOT leverage this for classification
+- The segmentation task works; the classification task doesn't benefit
 
 ## Next Steps (Priority Order)
 
-**HIGH PRIORITY - Multi-task Learning (Exp8):**
-1. ✅ Created multi-task fine-tuning code (CVS + Segmentation)
-2. Test locally on RTX 3080
-3. Run on RunPod A100 for full training
-4. Segmentation provides direct supervision for:
-   - Cystic Plate (C2 criterion)
-   - Calot Triangle (C1 criterion)
-   - Cystic Artery/Duct (C3 criterion)
+**HIGH PRIORITY - Staged Fine-tuning (Exp9):**
+1. ✅ Created staged fine-tuning code
+2. Run on RunPod A100:
+   - Stage 1: Train heads with frozen backbone (10 epochs)
+   - Stage 2: Minimal backbone fine-tuning (1 layer, 1e-6 LR)
+3. Target: >52% mAP without overfitting
 
-**Medium Priority - If Exp8 fails:**
-5. Try criterion-specific attention heads (one per CVS criterion)
-6. Consider hierarchical classification (detect anatomy first, then CVS)
-7. Use V-JEPA internal attention as auxiliary supervision
+**Medium Priority - If Exp9 fails:**
+4. Try criterion-specific attention heads (one per CVS criterion)
+5. Consider hierarchical classification (detect anatomy first, then CVS)
+6. Experiment with different backbone layers (middle layers vs last layers)
 
-**Lower Priority - General:**
-8. Try stronger regularization (higher dropout, more weight decay)
-9. More aggressive backbone fine-tuning (last 4 layers instead of 2)
-10. Surgical domain pre-training if available
+**Lower Priority - Alternative Approaches:**
+7. Try different video foundation models (VideoMAE, InternVideo)
+8. Consider ensemble of frozen features + fine-tuned features
+9. Surgical domain pre-training if available
 
 ---
 
-*Last updated: 2026-01-30*
+*Last updated: 2026-01-31*
