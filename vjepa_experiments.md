@@ -423,12 +423,115 @@ Staged approach rationale:
 - `train_staged.py` - Two-stage training script
 
 ### Status
-READY FOR TESTING
+🔄 **RUNNING** on RunPod A100
 
 ### To Run
 ```bash
 cd /workspace/vjepa
 python train_staged.py --config configs/exp9_staged_finetune.yaml
+```
+
+---
+
+## Key Insights So Far
+
+Based on experiments 2-8, here are the critical learnings:
+
+### 1. V-JEPA's Internal Attention is Uniform (~95-98% entropy)
+- V-JEPA doesn't naturally focus on surgical anatomy
+- It treats all spatial patches roughly equally
+- This is by design for self-supervised video learning
+- **Implication:** Need to adapt features, not just add heads
+
+### 2. Classifier-Level Fixes Don't Work
+| Approach | Result | Why |
+|----------|--------|-----|
+| Focal loss | 24.98% (-25%) | Too aggressive down-weighting |
+| Balanced sampling | 46.90% (-3%) | Train/val distribution mismatch |
+| C2-weighting (5x) | 49.79% (same) | Loss weighting can't fix features |
+
+### 3. Fine-tuning Overfits Quickly
+- Exp8 overfit by epoch 2-3 (85% train vs 41% val)
+- V-JEPA's attention remained uniform after fine-tuning
+- 2 layers + 1e-5 LR was too aggressive
+
+### 4. Segmentation Head CAN Learn Anatomy
+- Seg decoder extracts structure from distributed features
+- But this doesn't transfer to better classification
+- The classification task needs focused representations
+
+### 5. Staged Training May Help (Exp9)
+- Train heads first with frozen backbone
+- Then minimal backbone fine-tuning (1 layer, 1e-6 LR)
+- Prevents simultaneous head + backbone learning
+
+### 6. LoRA is Promising (Exp10)
+- Adapt features without destroying pretrained knowledge
+- Much fewer trainable parameters (~1-2M vs 25M)
+- Lower overfitting risk
+- Designed for exactly this use case
+
+---
+
+## Future Experiments
+
+### Exp10: LoRA (Low-Rank Adaptation) - PLANNED
+
+LoRA injects small trainable matrices into attention layers while keeping all original V-JEPA weights frozen.
+
+**Why LoRA is ideal for this problem:**
+- Freezes ALL V-JEPA weights (no catastrophic forgetting)
+- Only trains small adapter matrices A, B
+- ~1-2M trainable params instead of 25M
+- Much lower overfitting risk
+- Designed for adapting large pretrained models to new domains
+
+**Configuration:**
+```python
+from peft import LoraConfig, get_peft_model
+
+lora_config = LoraConfig(
+    r=16,                          # Rank (controls capacity)
+    lora_alpha=32,                 # Scaling factor
+    target_modules=["q_proj", "v_proj"],  # Which modules to adapt
+    lora_dropout=0.1,              # Regularization
+)
+
+# Apply LoRA to V-JEPA backbone
+model.backbone = get_peft_model(model.backbone, lora_config)
+```
+
+**Expected benefits:**
+- Preserves V-JEPA's pretrained video understanding
+- Learns surgical domain-specific adaptations
+- Should prevent the overfitting seen in Exp8
+
+### Other Techniques to Consider
+
+| Technique | Description | Priority | Rationale |
+|-----------|-------------|----------|-----------|
+| **MixUp/CutMix** | Blend images during training | High | Critical regularizer for transformers, shown to help ViT significantly |
+| **DropPath** | Randomly skip transformer layers | Medium | Strong regularizer, reduces overfitting |
+| **Test-Time Augmentation** | Average predictions over augmented versions | Low | Free boost, no training cost |
+| **Layer-wise LR Decay (LLRD)** | Different LR per layer depth | Medium | Earlier layers get lower LR, preserves general features |
+| **Gradient Checkpointing** | Trade compute for memory | Low | Would allow larger batches |
+| **Label Smoothing** | Soft targets instead of hard 0/1 | Medium | Prevents overconfident predictions |
+
+### Technique Details
+
+**MixUp (High Priority):**
+```python
+# During training, blend two samples
+lambda_ = np.random.beta(0.2, 0.2)
+mixed_video = lambda_ * video_a + (1 - lambda_) * video_b
+mixed_label = lambda_ * label_a + (1 - lambda_) * label_b
+```
+
+**Layer-wise LR Decay:**
+```python
+# Lower LR for earlier layers
+for i, layer in enumerate(model.backbone.layers):
+    layer_lr = base_lr * (decay_rate ** (num_layers - i))
 ```
 
 ---
@@ -450,15 +553,16 @@ Training set imbalance:
 
 ## Summary Table
 
-| Exp | Approach | Best Val mAP | Notes |
-|-----|----------|--------------|-------|
-| **2** | Attention pooling (frozen) | **49.79%** | **BASELINE** - Best so far |
-| 3 | Focal loss | 24.98% | Much worse |
-| 4 | Balanced sampling | 46.90% | Distribution mismatch |
-| 5 | Focal + Balanced | - | Skipped |
-| 6 | C2-weighted loss | 49.79% | No improvement |
-| 8 | Multi-task fine-tune (2 layers) | 48.03% | Overfit, V-JEPA unchanged |
-| **9** | Staged fine-tune | **TBD** | Next experiment |
+| Exp | Approach | Best Val mAP | Status | Notes |
+|-----|----------|--------------|--------|-------|
+| **2** | Attention pooling (frozen) | **49.79%** | ✅ Done | **BASELINE** - Best so far |
+| 3 | Focal loss | 24.98% | ✅ Done | Much worse |
+| 4 | Balanced sampling | 46.90% | ✅ Done | Distribution mismatch |
+| 5 | Focal + Balanced | - | ⏭️ Skip | Both components failed |
+| 6 | C2-weighted loss | 49.79% | ✅ Done | No improvement |
+| 8 | Multi-task fine-tune (2 layers) | 48.03% | ✅ Done | Overfit, V-JEPA unchanged |
+| **9** | Staged fine-tune | **TBD** | 🔄 Running | Conservative 2-stage approach |
+| **10** | LoRA adapters | **TBD** | 📋 Planned | Low-rank adaptation, ~1-2M params |
 
 ## Conclusions
 
@@ -501,22 +605,31 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ## Next Steps (Priority Order)
 
-**HIGH PRIORITY - Staged Fine-tuning (Exp9):**
-1. ✅ Created staged fine-tuning code
-2. Run on RunPod A100:
-   - Stage 1: Train heads with frozen backbone (10 epochs)
+**HIGH PRIORITY - Current:**
+1. 🔄 **Exp9 (Running):** Staged fine-tuning
+   - Stage 1: Train heads with frozen backbone
    - Stage 2: Minimal backbone fine-tuning (1 layer, 1e-6 LR)
-3. Target: >52% mAP without overfitting
+   - Target: >52% mAP
 
-**Medium Priority - If Exp9 fails:**
+**HIGH PRIORITY - Next:**
+2. 📋 **Exp10:** LoRA adaptation
+   - Inject trainable adapters into V-JEPA attention
+   - ~1-2M params instead of 25M
+   - Much lower overfitting risk
+
+3. 📋 **MixUp/CutMix regularization**
+   - Critical for transformer training
+   - Can combine with Exp9 or Exp10
+
+**Medium Priority - If above fail:**
 4. Try criterion-specific attention heads (one per CVS criterion)
-5. Consider hierarchical classification (detect anatomy first, then CVS)
-6. Experiment with different backbone layers (middle layers vs last layers)
+5. Layer-wise LR decay (LLRD) for gradual fine-tuning
+6. Label smoothing to prevent overconfident predictions
 
 **Lower Priority - Alternative Approaches:**
 7. Try different video foundation models (VideoMAE, InternVideo)
 8. Consider ensemble of frozen features + fine-tuned features
-9. Surgical domain pre-training if available
+9. Test-Time Augmentation (free boost)
 
 ---
 
