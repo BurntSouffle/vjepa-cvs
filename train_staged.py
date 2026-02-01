@@ -399,6 +399,36 @@ def create_scheduler(optimizer, num_training_steps: int, num_warmup_steps: int, 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def create_cosine_scheduler_with_warmup(
+    optimizer,
+    num_training_steps: int,
+    warmup_ratio: float = 0.1,
+    min_lr_ratio: float = 0.01,
+):
+    """
+    Create cosine annealing scheduler with warmup for Stage 2.
+
+    Args:
+        optimizer: The optimizer
+        num_training_steps: Total number of training steps
+        warmup_ratio: Fraction of steps for warmup (default 10%)
+        min_lr_ratio: Minimum LR as ratio of base LR (default 0.01 = 1% of base)
+    """
+    num_warmup_steps = int(num_training_steps * warmup_ratio)
+
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            # Linear warmup from 0 to 1
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # Cosine decay from 1.0 to min_lr_ratio
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        # Scale: cosine goes from 1->0, we want 1->min_lr_ratio
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 def train_epoch(model, train_loader, criterion, optimizer, scheduler, device, config, scaler, logger):
     """Train for one epoch."""
     model.train()
@@ -556,8 +586,21 @@ def train_stage(
     results_dir: Path,
     logger,
     device: torch.device,
+    use_cosine_warmup: bool = False,
 ):
-    """Train a single stage."""
+    """Train a single stage.
+
+    Args:
+        stage: Stage number (1 or 2)
+        model: The model to train
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        config: Configuration dictionary
+        results_dir: Directory to save results
+        logger: Logger instance
+        device: Device to train on
+        use_cosine_warmup: If True, use cosine annealing with 10% warmup (for Stage 2 only mode)
+    """
     stage_cfg = config[f"stage{stage}"]
     training_cfg = config["training"]
 
@@ -571,14 +614,27 @@ def train_stage(
     accum_steps = stage_cfg.get("gradient_accumulation", 1)
     steps_per_epoch = len(train_loader) // accum_steps
     num_training_steps = steps_per_epoch * stage_cfg["epochs"]
-    num_warmup_steps = steps_per_epoch * stage_cfg.get("warmup_epochs", 1)
 
-    scheduler = create_scheduler(
-        optimizer,
-        num_training_steps,
-        num_warmup_steps,
-        training_cfg["min_lr"],
-    )
+    if use_cosine_warmup:
+        # Cosine annealing with 10% warmup, decay to min_lr_ratio
+        # min_lr_ratio = 1e-7 / base_lr, but we use 0.01 as a reasonable ratio
+        # For backbone_lr=1e-6, this gives min_lr=1e-8; for head_lr=5e-5, min_lr=5e-7
+        scheduler = create_cosine_scheduler_with_warmup(
+            optimizer,
+            num_training_steps,
+            warmup_ratio=0.1,  # 10% warmup
+            min_lr_ratio=0.01,  # Decay to 1% of initial LR
+        )
+        logger.info(f"Using cosine annealing with 10% warmup ({int(num_training_steps * 0.1)} steps)")
+        logger.info(f"LR will decay to 1% of initial over {num_training_steps} total steps")
+    else:
+        num_warmup_steps = steps_per_epoch * stage_cfg.get("warmup_epochs", 1)
+        scheduler = create_scheduler(
+            optimizer,
+            num_training_steps,
+            num_warmup_steps,
+            training_cfg["min_lr"],
+        )
 
     # Loss
     criterion = MultiTaskLoss(
@@ -661,8 +717,17 @@ def train_stage(
     return results_dir / f"stage{stage}_best.pt", best_metric
 
 
-def main(config_path: str = "configs/exp9_staged_finetune.yaml"):
-    """Main training function."""
+def main(config_path: str = "configs/exp9_staged_finetune.yaml", stage2_only: bool = False, checkpoint_path: str = None):
+    """Main training function.
+
+    Args:
+        config_path: Path to config YAML file
+        stage2_only: If True, skip Stage 1 and run Stage 2 directly
+        checkpoint_path: Path to checkpoint to load (required if stage2_only=True)
+    """
+    if stage2_only and checkpoint_path is None:
+        raise ValueError("--checkpoint is required when using --stage2_only")
+
     config = load_config(config_path)
     set_seed(config["seed"])
 
@@ -718,58 +783,76 @@ def main(config_path: str = "configs/exp9_staged_finetune.yaml"):
     logger.info(f"Train: {len(train_dataset)} clips")
     logger.info(f"Val: {len(val_dataset)} clips")
 
-    # ==================== STAGE 1 ====================
-    logger.info("\n" + "=" * 70)
-    logger.info("STAGE 1: Training heads with frozen backbone")
-    logger.info("=" * 70)
+    # Initialize stage 1 metrics for summary
+    stage1_best_metric = None
+    stage1_best_path = None
 
-    stage1_cfg = config["stage1"]
+    if not stage2_only:
+        # ==================== STAGE 1 ====================
+        logger.info("\n" + "=" * 70)
+        logger.info("STAGE 1: Training heads with frozen backbone")
+        logger.info("=" * 70)
 
-    # Create data loaders for stage 1
-    train_loader_s1 = DataLoader(
-        train_dataset,
-        batch_size=stage1_cfg["batch_size"],
-        shuffle=True,
-        num_workers=config["training"]["num_workers"],
-        collate_fn=collate_fn,
-        pin_memory=True,
-    )
+        stage1_cfg = config["stage1"]
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=stage1_cfg["batch_size"],
-        shuffle=False,
-        num_workers=config["training"]["num_workers"],
-        collate_fn=collate_fn,
-        pin_memory=True,
-    )
+        # Create data loaders for stage 1
+        train_loader_s1 = DataLoader(
+            train_dataset,
+            batch_size=stage1_cfg["batch_size"],
+            shuffle=True,
+            num_workers=config["training"]["num_workers"],
+            collate_fn=collate_fn,
+            pin_memory=True,
+        )
 
-    # Create model for stage 1 (frozen backbone)
-    model_s1 = create_model_for_stage(config, stage=1)
-    model_s1 = model_s1.to(device)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=stage1_cfg["batch_size"],
+            shuffle=False,
+            num_workers=config["training"]["num_workers"],
+            collate_fn=collate_fn,
+            pin_memory=True,
+        )
 
-    logger.info(f"Stage 1 - Total params: {model_s1.get_num_total_params() / 1e6:.1f}M")
-    logger.info(f"Stage 1 - Trainable params: {model_s1.get_num_trainable_params() / 1e6:.1f}M")
+        # Create model for stage 1 (frozen backbone)
+        model_s1 = create_model_for_stage(config, stage=1)
+        model_s1 = model_s1.to(device)
 
-    # Train stage 1
-    stage1_best_path, stage1_best_metric = train_stage(
-        stage=1,
-        model=model_s1,
-        train_loader=train_loader_s1,
-        val_loader=val_loader,
-        config=config,
-        results_dir=results_dir,
-        logger=logger,
-        device=device,
-    )
+        logger.info(f"Stage 1 - Total params: {model_s1.get_num_total_params() / 1e6:.1f}M")
+        logger.info(f"Stage 1 - Trainable params: {model_s1.get_num_trainable_params() / 1e6:.1f}M")
 
-    # Clean up stage 1 model
-    del model_s1
-    torch.cuda.empty_cache()
+        # Train stage 1
+        stage1_best_path, stage1_best_metric = train_stage(
+            stage=1,
+            model=model_s1,
+            train_loader=train_loader_s1,
+            val_loader=val_loader,
+            config=config,
+            results_dir=results_dir,
+            logger=logger,
+            device=device,
+        )
+
+        # Clean up stage 1 model
+        del model_s1
+        torch.cuda.empty_cache()
+    else:
+        # Stage 2 only mode - load checkpoint info
+        logger.info("\n" + "=" * 70)
+        logger.info("STAGE 2 ONLY MODE: Skipping Stage 1")
+        logger.info(f"Loading checkpoint: {checkpoint_path}")
+        logger.info("=" * 70)
+
+        # Load checkpoint to get best mAP from Stage 1
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        stage1_best_metric = checkpoint.get("best_metric", 0.0)
+        stage1_best_path = checkpoint_path
+        logger.info(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+        logger.info(f"Stage 1 best mAP from checkpoint: {stage1_best_metric*100:.2f}%")
 
     # ==================== STAGE 2 ====================
     logger.info("\n" + "=" * 70)
-    logger.info("STAGE 2: Minimal backbone fine-tuning")
+    logger.info("STAGE 2: Minimal backbone fine-tuning with cosine annealing")
     logger.info("=" * 70)
 
     stage2_cfg = config["stage2"]
@@ -793,14 +876,15 @@ def main(config_path: str = "configs/exp9_staged_finetune.yaml"):
         pin_memory=True,
     )
 
-    # Create model for stage 2 (unfreeze 1 layer) and load stage 1 weights
-    model_s2 = create_model_for_stage(config, stage=2, checkpoint_path=str(stage1_best_path))
+    # Create model for stage 2 (unfreeze 1 layer) and load checkpoint weights
+    checkpoint_to_load = checkpoint_path if stage2_only else str(stage1_best_path)
+    model_s2 = create_model_for_stage(config, stage=2, checkpoint_path=checkpoint_to_load)
     model_s2 = model_s2.to(device)
 
     logger.info(f"Stage 2 - Total params: {model_s2.get_num_total_params() / 1e6:.1f}M")
     logger.info(f"Stage 2 - Trainable params: {model_s2.get_num_trainable_params() / 1e6:.1f}M")
 
-    # Train stage 2
+    # Train stage 2 (uses cosine annealing with warmup)
     stage2_best_path, stage2_best_metric = train_stage(
         stage=2,
         model=model_s2,
@@ -810,6 +894,7 @@ def main(config_path: str = "configs/exp9_staged_finetune.yaml"):
         results_dir=results_dir,
         logger=logger,
         device=device,
+        use_cosine_warmup=stage2_only,  # Use cosine warmup scheduler for stage2_only mode
     )
 
     # Save final model
@@ -820,15 +905,17 @@ def main(config_path: str = "configs/exp9_staged_finetune.yaml"):
     logger.info("\n" + "=" * 70)
     logger.info("TRAINING COMPLETE")
     logger.info("=" * 70)
-    logger.info(f"Stage 1 best mAP: {stage1_best_metric*100:.2f}%")
+    if stage1_best_metric is not None:
+        logger.info(f"Stage 1 best mAP: {stage1_best_metric*100:.2f}%")
     logger.info(f"Stage 2 best mAP: {stage2_best_metric*100:.2f}%")
     logger.info(f"Final model saved to: {results_dir / 'best_model.pt'}")
 
-    improvement = stage2_best_metric - stage1_best_metric
-    if improvement > 0:
-        logger.info(f"Stage 2 improved over Stage 1 by {improvement*100:.2f}%")
-    else:
-        logger.info(f"Stage 2 did not improve over Stage 1 (diff: {improvement*100:.2f}%)")
+    if stage1_best_metric is not None:
+        improvement = stage2_best_metric - stage1_best_metric
+        if improvement > 0:
+            logger.info(f"Stage 2 improved over Stage 1 by {improvement*100:.2f}%")
+        else:
+            logger.info(f"Stage 2 did not improve over Stage 1 (diff: {improvement*100:.2f}%)")
 
     return results_dir
 
@@ -836,6 +923,10 @@ def main(config_path: str = "configs/exp9_staged_finetune.yaml"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Staged fine-tuning for V-JEPA CVS model")
     parser.add_argument("--config", type=str, default="configs/exp9_staged_finetune.yaml")
+    parser.add_argument("--stage2_only", action="store_true",
+                        help="Skip Stage 1, go directly to Stage 2")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to Stage 1 checkpoint to load (required with --stage2_only)")
     args = parser.parse_args()
 
-    main(args.config)
+    main(args.config, stage2_only=args.stage2_only, checkpoint_path=args.checkpoint)
