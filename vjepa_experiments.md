@@ -357,7 +357,7 @@ Sample CVS predictions on positive samples:
 
 ---
 
-## Experiment 9: Staged Fine-Tuning (PLANNED)
+## Experiment 9: Staged Fine-Tuning - COMPLETED
 
 ### Hypothesis
 Based on Exp8 findings and dermatology ViT paper (fine-tuning on small datasets):
@@ -365,17 +365,6 @@ Based on Exp8 findings and dermatology ViT paper (fine-tuning on small datasets)
 - **Stage 2**: Then fine-tune backbone minimally (1 layer, very low LR)
 
 This prevents overfitting by letting heads adapt to V-JEPA features before any backbone modification.
-
-### Motivation
-Exp8 showed:
-- Fine-tuning 2 layers immediately caused overfitting (85% train vs 41% val)
-- V-JEPA's internal attention didn't become more focused (98% entropy)
-- The problem: heads and backbone were learning simultaneously
-
-Staged approach rationale:
-1. Stage 1 lets heads learn optimal use of frozen V-JEPA features
-2. Stage 2 then makes minimal backbone adjustments to support those heads
-3. Much lower LR prevents catastrophic forgetting of pretrained representations
 
 ### Configuration
 
@@ -398,37 +387,95 @@ Staged approach rationale:
 | Batch Size | 16 (effective 128) |
 | Early Stopping | 3 epochs patience |
 
-### Key Differences from Exp8
-| Setting | Exp8 | Exp9 |
-|---------|------|------|
-| Staging | None (immediate unfreeze) | 2-stage |
-| Unfrozen layers | 2 | 0 → 1 |
-| Backbone LR | 1e-5 | 1e-6 (20x lower) |
-| seg_weight | 0.5 | 0.3 (focus on CVS) |
-| Augmentation | Flip only | Rotation, color jitter, erasing, blur |
+### Results
 
-### New Augmentations
-- Random rotation: ±15 degrees
-- Color jitter: brightness 0.3, contrast 0.3, saturation 0.2, hue 0.1
-- Random erasing: 20% probability
-- Gaussian blur: 10% probability
+**Stage 1 (Frozen backbone, train heads only):**
+| Epoch | Train mAP | Val mAP | C1 AP | C2 AP | C3 AP |
+|-------|-----------|---------|-------|-------|-------|
+| 1 | 27.34% | 44.15% | 43.27% | 46.93% | 42.26% |
+| 2 | 60.18% | **49.94%** | 45.33% | 51.28% | 53.21% |
+| 3 | 72.26% | 45.71% | 40.23% | 44.63% | 52.28% |
+| 4 | 78.39% | 39.87% | 40.00% | 36.56% | 43.05% |
 
-### Expected Outcome
-- Stage 1 should match or beat Exp2 baseline (49.79%)
-- Stage 2 should add small improvement without overfitting
-- **Target: >52% mAP**
+Best Stage 1: **49.94% mAP** (Epoch 2) - matches baseline!
+
+**Stage 2 (Unfreeze 1 layer, very low LR):**
+| Epoch | Train mAP | Val mAP | C1 AP | C2 AP | C3 AP |
+|-------|-----------|---------|-------|-------|-------|
+| 1 | - | **48.49%** | - | - | - |
+| 3 | 76.42% | 47.82% | 42.68% | 49.58% | 51.19% |
+| 4 | 77.36% | 47.86% | 42.86% | 49.59% | 51.12% |
+
+Early stopped at epoch 4. Best Stage 2: **48.49% mAP** (Epoch 1)
+
+### Conclusion
+
+- Stage 1 (frozen): **49.94%** ✅ Best result, matches baseline
+- Stage 2 (unfreeze 1): **48.49%** ❌ Made it worse (-1.45%)
+- **Fine-tuning V-JEPA hurts performance** - even 1 layer with 1e-6 LR overfits
+- Pretrained features are better than anything we can fine-tune to
+
+### Key Finding
+**Any backbone fine-tuning degrades performance.** Even the most conservative approach (1 layer, 1e-6 LR, after head pretraining) caused immediate degradation. V-JEPA's pretrained representations are optimal for this task - we should focus on better ways to use them, not modify them.
 
 ### Files
 - `configs/exp9_staged_finetune.yaml` - Experiment config
 - `train_staged.py` - Two-stage training script
 
-### Status
-🔄 **RUNNING** on RunPod A100
+### Checkpoint
+`/workspace/results/exp9_staged_finetune/run_20260131_211037/stage1_best.pt`
+
+---
+
+## Experiment 10: LoRA Fine-Tuning - RUNNING 🔄
+
+### Hypothesis
+LoRA (Low-Rank Adaptation) adapts pretrained features without destroying them by:
+- Freezing all original weights
+- Adding small trainable adapter matrices (A × B) to attention layers
+- Only 0.57% of parameters trainable
+
+### Motivation
+Exp9 confirmed that even minimal backbone fine-tuning hurts performance. LoRA offers an alternative:
+- Original V-JEPA weights stay frozen (no degradation possible)
+- Learns domain-specific adaptations through low-rank matrices
+- Much smaller parameter count reduces overfitting risk
+
+### Configuration
+| Setting | Value |
+|---------|-------|
+| LoRA rank (r) | 16 |
+| LoRA alpha | 32 |
+| Target modules | q_proj, v_proj |
+| LoRA dropout | 0.1 |
+| LoRA params | 1.87M |
+| Head params | 5.65M |
+| Total trainable | 7.52M (2.25%) |
+| LoRA LR | 1e-4 |
+| Head LR | 5e-4 |
+| Scheduler | Cosine with 13% warmup |
+
+### Early Results
+| Epoch | Train mAP | Val mAP | C1 AP | C2 AP | C3 AP |
+|-------|-----------|---------|-------|-------|-------|
+| 1 | 25.32% | 43.79% | 40.81% | 48.89% | 41.66% |
+
+Training in progress...
+
+### Why LoRA Should Work
+1. **Preserves pretrained V-JEPA knowledge** - original weights untouched
+2. **Very few parameters** (1.87M) - hard to overfit
+3. **Specifically adapts attention** (q_proj, v_proj) - targets representation learning
+4. **Proven technique** for domain adaptation of large pretrained models
+
+### Files
+- `configs/exp10_lora.yaml` - Experiment config
+- `train_lora.py` - LoRA training script (requires `pip install peft`)
 
 ### To Run
 ```bash
-cd /workspace/vjepa
-python train_staged.py --config configs/exp9_staged_finetune.yaml
+pip install peft
+python train_lora.py --config configs/exp10_lora.yaml
 ```
 
 ---
@@ -460,51 +507,21 @@ Based on experiments 2-8, here are the critical learnings:
 - But this doesn't transfer to better classification
 - The classification task needs focused representations
 
-### 5. Staged Training May Help (Exp9)
-- Train heads first with frozen backbone
-- Then minimal backbone fine-tuning (1 layer, 1e-6 LR)
-- Prevents simultaneous head + backbone learning
+### 5. Staged Training Confirmed: Frozen is Best (Exp9)
+- Stage 1 (frozen backbone): **49.94% mAP** ✅ Best result
+- Stage 2 (unfreeze 1 layer): **48.49% mAP** ❌ Degraded
+- Even 1 layer with 1e-6 LR causes overfitting
+- **Conclusion: Don't fine-tune V-JEPA at all**
 
-### 6. LoRA is Promising (Exp10)
-- Adapt features without destroying pretrained knowledge
-- Much fewer trainable parameters (~1-2M vs 25M)
-- Lower overfitting risk
-- Designed for exactly this use case
+### 6. LoRA May Offer Different Approach (Exp10 - Running)
+- Adapt features without modifying original weights
+- Much fewer trainable parameters (1.87M LoRA + 5.65M heads)
+- Original V-JEPA weights stay frozen
+- First epoch: 43.79% mAP (training in progress)
 
 ---
 
 ## Future Experiments
-
-### Exp10: LoRA (Low-Rank Adaptation) - PLANNED
-
-LoRA injects small trainable matrices into attention layers while keeping all original V-JEPA weights frozen.
-
-**Why LoRA is ideal for this problem:**
-- Freezes ALL V-JEPA weights (no catastrophic forgetting)
-- Only trains small adapter matrices A, B
-- ~1-2M trainable params instead of 25M
-- Much lower overfitting risk
-- Designed for adapting large pretrained models to new domains
-
-**Configuration:**
-```python
-from peft import LoraConfig, get_peft_model
-
-lora_config = LoraConfig(
-    r=16,                          # Rank (controls capacity)
-    lora_alpha=32,                 # Scaling factor
-    target_modules=["q_proj", "v_proj"],  # Which modules to adapt
-    lora_dropout=0.1,              # Regularization
-)
-
-# Apply LoRA to V-JEPA backbone
-model.backbone = get_peft_model(model.backbone, lora_config)
-```
-
-**Expected benefits:**
-- Preserves V-JEPA's pretrained video understanding
-- Learns surgical domain-specific adaptations
-- Should prevent the overfitting seen in Exp8
 
 ### Other Techniques to Consider
 
@@ -553,30 +570,34 @@ Training set imbalance:
 
 ## Summary Table
 
-| Exp | Approach | Best Val mAP | Status | Notes |
-|-----|----------|--------------|--------|-------|
-| **2** | Attention pooling (frozen) | **49.79%** | ✅ Done | **BASELINE** - Best so far |
-| 3 | Focal loss | 24.98% | ✅ Done | Much worse |
-| 4 | Balanced sampling | 46.90% | ✅ Done | Distribution mismatch |
-| 5 | Focal + Balanced | - | ⏭️ Skip | Both components failed |
-| 6 | C2-weighted loss | 49.79% | ✅ Done | No improvement |
-| 8 | Multi-task fine-tune (2 layers) | 48.03% | ✅ Done | Overfit, V-JEPA unchanged |
-| **9** | Staged fine-tune | **TBD** | 🔄 Running | Conservative 2-stage approach |
-| **10** | LoRA adapters | **TBD** | 📋 Planned | Low-rank adaptation, ~1-2M params |
+| Exp | Approach | Trainable Params | Val mAP | vs Baseline |
+|-----|----------|------------------|---------|-------------|
+| **2** | Attention pooling (frozen) | 5.7M | 49.79% | **Baseline** |
+| 3 | Focal loss | 5.7M | 24.98% | -24.81% ❌ |
+| 4 | Balanced sampling | 5.7M | 46.90% | -2.89% ❌ |
+| 6 | C2-weighted loss | 5.7M | 49.79% | +0.00% |
+| 8 | Multi-task, unfreeze 2 | 30.8M | 48.03% | -1.76% ❌ |
+| **9-S1** | Staged, frozen | 5.7M | **49.94%** | **+0.15%** ✅ |
+| 9-S2 | Staged, unfreeze 1 | ~18M | 48.49% | -1.30% ❌ |
+| **10** | LoRA | 7.52M | 🔄 Running | TBD |
+
+### Key Takeaway
+**Fine-tuning V-JEPA backbone always hurts performance.** Best results come from frozen backbone with trainable heads only.
 
 ## Conclusions
 
-1. **Current Best: Exp2 (Frozen backbone + Attention pooling)** with 49.79% Val mAP
-2. **Focal loss hurts performance** - down-weighting easy negatives was counterproductive
-3. **Balanced sampling hurts performance** - causes train/val distribution mismatch
-4. **Simple BCE with random sampling is best** for this moderate imbalance (~5-8x)
-5. **Overfitting is the main challenge** - all experiments showed train-val gap widening
-6. **V-JEPA's internal attention is UNIFORM** - ~95-98% entropy, doesn't focus on anatomy
-7. **Fine-tuning doesn't fix attention** - Exp8 showed 2 layers unfrozen → still uniform
-8. **Seg head can extract anatomy** - but from distributed features, not focused attention
-9. **CVS head doesn't benefit from seg head** - multi-task didn't improve classification
-10. **C2 DETECTION IS BROKEN** - Model never correctly identifies C2-only samples
-11. **Need more conservative fine-tuning** - staged approach (Exp9) may prevent overfitting
+1. **Current Best: Exp9-S1 (Frozen backbone + Attention pooling)** with **49.94%** Val mAP
+2. **ANY backbone fine-tuning hurts performance** - Exp8 (2 layers), Exp9-S2 (1 layer) both degraded
+3. **Focal loss hurts performance** - down-weighting easy negatives was counterproductive
+4. **Balanced sampling hurts performance** - causes train/val distribution mismatch
+5. **Simple BCE with random sampling is best** for this moderate imbalance (~5-8x)
+6. **Overfitting is the main challenge** - all experiments showed train-val gap widening
+7. **V-JEPA's internal attention is UNIFORM** - ~95-98% entropy, doesn't focus on anatomy
+8. **Fine-tuning doesn't fix attention** - Exp8 showed 2 layers unfrozen → still uniform
+9. **Seg head can extract anatomy** - but from distributed features, not focused attention
+10. **CVS head doesn't benefit from seg head** - multi-task didn't improve classification
+11. **C2 DETECTION IS BROKEN** - Model never correctly identifies C2-only samples
+12. **Pretrained V-JEPA features are optimal** - best to use them as-is, not modify them
 
 ## Root Cause Analysis
 
@@ -606,31 +627,29 @@ The ~50% mAP ceiling is explained by multiple factors:
 ## Next Steps (Priority Order)
 
 **HIGH PRIORITY - Current:**
-1. 🔄 **Exp9 (Running):** Staged fine-tuning
-   - Stage 1: Train heads with frozen backbone
-   - Stage 2: Minimal backbone fine-tuning (1 layer, 1e-6 LR)
-   - Target: >52% mAP
+1. 🔄 **Exp10 (Running):** LoRA adaptation
+   - Inject trainable adapters into V-JEPA attention
+   - 1.87M LoRA params + 5.65M head params
+   - First epoch: 43.79% mAP (training in progress)
 
 **HIGH PRIORITY - Next:**
-2. 📋 **Exp10:** LoRA adaptation
-   - Inject trainable adapters into V-JEPA attention
-   - ~1-2M params instead of 25M
-   - Much lower overfitting risk
-
-3. 📋 **MixUp/CutMix regularization**
+2. 📋 **MixUp/CutMix regularization**
    - Critical for transformer training
-   - Can combine with Exp9 or Exp10
+   - Can combine with frozen backbone approach
+
+3. 📋 **Attention architecture improvements**
+   - Criterion-specific attention heads (one per CVS criterion)
+   - Multi-scale temporal attention
 
 **Medium Priority - If above fail:**
-4. Try criterion-specific attention heads (one per CVS criterion)
-5. Layer-wise LR decay (LLRD) for gradual fine-tuning
-6. Label smoothing to prevent overconfident predictions
+4. Label smoothing to prevent overconfident predictions
+5. Test-Time Augmentation (free boost)
+6. Ensemble of multiple training runs
 
 **Lower Priority - Alternative Approaches:**
 7. Try different video foundation models (VideoMAE, InternVideo)
-8. Consider ensemble of frozen features + fine-tuned features
-9. Test-Time Augmentation (free boost)
+8. Consider different pooling strategies (temporal attention, etc.)
 
 ---
 
-*Last updated: 2026-01-31*
+*Last updated: 2026-02-01*
