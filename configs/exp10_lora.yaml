@@ -1,0 +1,113 @@
+# Experiment 10: LoRA Fine-Tuning
+# ================================
+# Use Low-Rank Adaptation (LoRA) to efficiently fine-tune V-JEPA
+#
+# Motivation: Previous experiments showed that fine-tuning backbone layers
+# can degrade V-JEPA's pretrained representations. LoRA offers a way to
+# adapt the model without modifying original weights.
+#
+# Strategy:
+#   - Freeze ALL original V-JEPA weights
+#   - Add small trainable LoRA adapters to attention layers
+#   - Train LoRA adapters + task heads
+#   - Much fewer trainable params (~1-2M vs 25M)
+#
+# Key benefits:
+#   - Original representations fully preserved
+#   - Efficient: only ~1-2% of params trained
+#   - Can merge LoRA weights for inference (no overhead)
+
+experiment:
+  name: "exp10_lora"
+  description: "LoRA adaptation of V-JEPA for CVS classification"
+  hypothesis: >
+    LoRA adapts pretrained features by learning low-rank updates to attention
+    weights, without modifying the original parameters. This should preserve
+    V-JEPA's learned representations while adapting to surgical domain.
+  baseline: "exp9_stage1 (49.94% mAP with frozen backbone)"
+
+# LoRA configuration
+lora:
+  r: 16                      # Rank of adaptation matrices (higher = more capacity)
+  lora_alpha: 32             # Scaling factor (typically 2x rank)
+  target_modules:            # Which modules to adapt
+    - "q_proj"               # Query projection in attention
+    - "v_proj"               # Value projection in attention
+  lora_dropout: 0.1          # Dropout on LoRA layers
+  bias: "none"               # Don't train biases
+
+# Model configuration
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  hidden_dim: 1024
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+  num_seg_classes: 5
+  seg_output_size: 64
+  seg_dropout: 0.1
+
+# Training configuration
+training:
+  epochs: 15
+  batch_size: 32
+  gradient_accumulation: 4   # Effective batch = 128
+  head_lr: 5.0e-4            # LR for task heads
+  lora_lr: 1.0e-4            # LR for LoRA adapters
+  weight_decay: 0.05
+  scheduler: "cosine"
+  warmup_epochs: 2
+  min_lr: 1.0e-7
+  early_stopping_patience: 5
+  num_workers: 8
+  mixed_precision: true
+  grad_clip: 1.0
+
+# Data paths
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results/exp10_lora"
+
+# Dataset configuration
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  mask_resolution: 64
+  use_synthetic_masks: true
+
+# Data augmentation (same as Exp9)
+augmentation:
+  horizontal_flip_prob: 0.5
+  rotation_degrees: 15
+  color_jitter:
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.2
+    hue: 0.1
+  random_erasing_prob: 0.2
+  gaussian_blur_prob: 0.1
+  gaussian_blur_sigma: [0.1, 2.0]
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3
+  cvs_pos_weight: [1.0, 3.0, 1.0]
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "balanced_accuracy"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_checkpoints: true
+
+# Reproducibility
+seed: 42
