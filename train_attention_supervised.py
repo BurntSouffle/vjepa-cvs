@@ -46,39 +46,68 @@ def custom_collate_fn(batch):
     masks [N, 64, 64]. PyTorch's default collate can't stack these together.
 
     Solution: Pad empty masks with zeros and track which samples have valid masks.
+
+    Dataset returns:
+        - video: numpy array (T, H, W, C) uint8
+        - labels: tensor (3,) float32
+        - masks: tensor (N, H, W) int64 - may be empty [0, H, W]
+        - mask_indices: tensor (N,) int64
+        - has_masks: bool
+        - meta: dict
     """
-    # Stack videos and labels (always same size)
-    videos = torch.stack([b['video'] for b in batch])
+    # Convert numpy video to tensor and stack
+    videos = []
+    for b in batch:
+        video = b['video']
+        if isinstance(video, np.ndarray):
+            video = torch.from_numpy(video)
+        videos.append(video)
+    videos = torch.stack(videos)
+
+    # Labels are already tensors
     labels = torch.stack([b['labels'] for b in batch])
 
     # Handle masks - find max number of masks in batch
-    max_masks = max(b['masks'].shape[0] if b['masks'].shape[0] > 0 else 0 for b in batch)
+    max_masks = 0
+    for b in batch:
+        if b['masks'].numel() > 0 and b['masks'].shape[0] > 0:
+            max_masks = max(max_masks, b['masks'].shape[0])
     max_masks = max(max_masks, 1)  # At least 1 for padding
 
-    mask_h = batch[0]['masks'].shape[-2] if batch[0]['masks'].dim() >= 2 else 64
-    mask_w = batch[0]['masks'].shape[-1] if batch[0]['masks'].dim() >= 2 else 64
+    # Get mask dimensions from first sample with valid masks, or use defaults
+    mask_h, mask_w = 64, 64
+    for b in batch:
+        if b['masks'].numel() > 0 and len(b['masks'].shape) >= 2:
+            mask_h = b['masks'].shape[-2]
+            mask_w = b['masks'].shape[-1]
+            break
 
     masks_list = []
     mask_indices_list = []
     has_mask_list = []
 
     for b in batch:
-        num_masks = b['masks'].shape[0] if b['masks'].shape[0] > 0 else 0
+        masks_tensor = b['masks']
+        indices_tensor = b['mask_indices']
 
-        if num_masks > 0:
-            # Has valid masks
-            padded_masks = torch.zeros(max_masks, mask_h, mask_w, dtype=b['masks'].dtype)
-            padded_masks[:num_masks] = b['masks']
+        # Check if this sample has valid masks
+        has_valid = masks_tensor.numel() > 0 and masks_tensor.shape[0] > 0
+        num_masks = masks_tensor.shape[0] if has_valid else 0
+
+        if has_valid:
+            # Has valid masks - pad to max_masks
+            padded_masks = torch.zeros(max_masks, mask_h, mask_w, dtype=masks_tensor.dtype)
+            padded_masks[:num_masks] = masks_tensor
             masks_list.append(padded_masks)
 
             # Pad mask indices
             padded_indices = torch.full((max_masks,), -1, dtype=torch.long)
-            padded_indices[:num_masks] = b['mask_indices'][:num_masks]
+            padded_indices[:num_masks] = indices_tensor[:num_masks]
             mask_indices_list.append(padded_indices)
 
             has_mask_list.append(True)
         else:
-            # No valid masks - create dummy
+            # No valid masks - create dummy placeholders
             masks_list.append(torch.zeros(max_masks, mask_h, mask_w, dtype=torch.long))
             mask_indices_list.append(torch.full((max_masks,), -1, dtype=torch.long))
             has_mask_list.append(False)
