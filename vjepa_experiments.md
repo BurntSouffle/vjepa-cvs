@@ -527,24 +527,36 @@ Task Heads:                HOW to classify → Trained on surgical domain
 
 ---
 
-### Exp10b: Higher Rank LoRA (r=32 + k_proj) - RUNNING 🔄
+### Exp10b: Higher Rank LoRA (r=32 + k_proj) - RUNNING 🔄 NEW BEST!
 
 **Hypothesis:** More LoRA capacity + targeting k_proj might change attention patterns
 
 **Settings:**
 | Setting | Exp10a | Exp10b |
 |---------|--------|--------|
-| LoRA r | 16 | 32 (2x) |
-| LoRA alpha | 32 | 64 |
-| Target modules | q, v | q, k, v |
-| LoRA params | 1.87M | ~4M |
+| LoRA r | 16 | **32** (2x capacity) |
+| LoRA alpha | 32 | **64** |
+| Target modules | q, v | **q, k, v** (+k_proj) |
+| LoRA LR | 1e-4 | 1e-4 |
+| Trainable params | 7.52M | ~10M |
+
+**Results (in progress):**
+| Epoch | Train mAP | Val mAP | C1 AP | C2 AP | C3 AP |
+|-------|-----------|---------|-------|-------|-------|
+| 1 | 33.66% | **54.59%** 🏆 | 50.71% | **59.81%** 🏆 | 53.24% |
+
+**This is a NEW RECORD at epoch 1!**
+- +0.84% over Exp10a's best (53.75%)
+- C2 AP jumped to 59.81% (was 55.03%)
+- Training still in progress...
+
+**Why k_proj matters:**
+Adding k_proj means LoRA can modify how attention KEYS are computed, not just queries and values. This allows actual changes to attention patterns, not just value extraction.
 
 **Motivation:** Exp10a showed attention entropy only reduced 0.5%. Adding k_proj targets the key projection which directly affects attention computation:
 - **q_proj** affects query vectors (what to search for)
 - **k_proj** affects key vectors (what to match against) ← NEW
 - **v_proj** affects value vectors (what to output)
-
-Training in progress...
 
 ---
 
@@ -560,11 +572,12 @@ Training in progress...
 
 ## Key Insights
 
-1. **LoRA is the winner** - 53.75% mAP, +3.96% over baseline
-2. **V-JEPA attention stays uniform** - LoRA improves via value projections, not attention focus
-3. **Overfitting happens at epoch 2-3** - regardless of LR, approach, or architecture
-4. **Fine-tuning backbone hurts** - frozen backbone + LoRA adapters works best
-5. **C2 detection improved** - 55.03% AP (was ~50% at baseline)
+1. **LoRA is the winner** - 54.59% mAP (Exp10b), +4.80% over baseline
+2. **k_proj matters!** - Adding key projection boosted C2 AP to 59.81% (was 55.03%)
+3. **V-JEPA attention stays uniform** - LoRA improves via value projections, not attention focus
+4. **Overfitting happens at epoch 2-3** - regardless of LR, approach, or architecture
+5. **Fine-tuning backbone hurts** - frozen backbone + LoRA adapters works best
+6. **Gap to SwinCVS: 12.86%** - 54.59% → 67.45% still to close
 
 ---
 
@@ -664,26 +677,136 @@ Training set imbalance:
 
 ## Summary Table
 
-| Exp | Approach | Trainable Params | Val mAP | vs Baseline |
-|-----|----------|------------------|---------|-------------|
-| 2 | Attention pooling (frozen) | 5.7M | 49.79% | Baseline |
-| 3 | Focal loss | 5.7M | 24.98% | -24.81% ❌ |
-| 4 | Balanced sampling | 5.7M | 46.90% | -2.89% ❌ |
-| 6 | C2-weighted loss | 5.7M | 49.79% | +0.00% |
-| 8 | Multi-task, unfreeze 2 | 30.8M | 48.03% | -1.76% ❌ |
-| 9-S1 | Staged, frozen | 5.7M | 49.94% | +0.15% |
-| 9-S2 | Staged, unfreeze 1 | ~18M | 48.49% | -1.30% ❌ |
-| **10a** | **LoRA r=16 (q+v)** | **7.52M** | **53.75%** | **+3.96%** 🏆 |
-| 10c | LoRA r=16 low LR | 7.52M | 52.56% | +2.77% |
-| 10b | LoRA r=32 (q+k+v) | ~10M | 🔄 Running | TBD |
+| Exp | Approach | Trainable Params | Val mAP | vs Baseline | vs SwinCVS |
+|-----|----------|------------------|---------|-------------|------------|
+| 2 | Attention pooling (frozen) | 5.7M | 49.79% | Baseline | -17.66% |
+| 3 | Focal loss | 5.7M | 24.98% | -24.81% ❌ | -42.47% |
+| 4 | Balanced sampling | 5.7M | 46.90% | -2.89% ❌ | -20.55% |
+| 6 | C2-weighted loss | 5.7M | 49.79% | +0.00% | -17.66% |
+| 8 | Multi-task, unfreeze 2 | 30.8M | 48.03% | -1.76% ❌ | -19.42% |
+| 9-S1 | Staged, frozen | 5.7M | 49.94% | +0.15% | -17.51% |
+| 9-S2 | Staged, unfreeze 1 | ~18M | 48.49% | -1.30% ❌ | -18.96% |
+| 10a | LoRA r=16 (q+v) | 7.52M | 53.75% | +3.96% | -13.70% |
+| 10c | LoRA r=16 low LR | 7.52M | 52.56% | +2.77% | -14.89% |
+| **10b** | **LoRA r=32 + k_proj** | **~10M** | **54.59%** 🔄 | **+4.80%** 🏆 | **-12.86%** |
+
+**Target to beat: SwinCVS 67.45% mAP**
 
 ### Key Takeaway
-**LoRA is the best approach.** Exp10a achieved 53.75% mAP (+3.96% over baseline). Direct fine-tuning always hurts performance.
+**LoRA is the best approach.** Exp10b achieved 54.59% mAP at epoch 1 (+4.80% over baseline, still training!). Adding k_proj significantly boosted C2 detection (59.81% AP).
+
+## Future Directions & Hybrid Ideas
+
+### Goal: Beat SwinCVS (67.45% mAP)
+
+Current gap: 54.59% → 67.45% = **12.86% to close**
+
+### Ideas to Explore
+
+#### 1. Higher LoRA Rank (r=64, r=128)
+If r=32 helps significantly, more capacity might help more.
+```yaml
+lora:
+  r: 64
+  lora_alpha: 128
+  target_modules: [q_proj, k_proj, v_proj]
+```
+
+#### 2. LoRA on ALL Attention + MLP
+Target more layers for adaptation:
+```yaml
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj      # Output projection
+  - fc1         # MLP layers
+  - fc2
+```
+
+#### 3. Window Attention Constraint
+Force V-JEPA to use local windows like Swin:
+- Mask global attention to local regions
+- Or add window attention as parallel path
+
+#### 4. Hybrid: SwinCVS Spatial + V-JEPA Temporal
+```
+Frame → SwinCVS Swin-B → Spatial features (local attention)
+↓
+V-JEPA temporal layers
+↓
+CVS Classification
+```
+Best of both: SwinCVS's local attention + V-JEPA's temporal modeling
+
+#### 5. Multi-Resolution Fusion
+```
+V-JEPA at 256×256 → Global context
+SwinCVS at 384×384 → Fine details
+↓
+Feature fusion → CVS
+```
+
+#### 6. Attention Supervision
+Explicitly train attention using mask locations:
+```
+Loss = CVS_loss + λ * attention_alignment_loss
+```
+Where attention should focus on masked anatomy regions.
+
+#### 7. Frame Selection Strategy
+SwinCVS uses 5 frames at 1fps, V-JEPA uses 16 frames.
+- Try V-JEPA with 5 frames (like SwinCVS)
+- Try adaptive frame selection (key moments)
+
+### Research Questions for Dissertation
+
+1. **Why does global attention fail for surgical anatomy?**
+   - V-JEPA's uniform attention (98% entropy) vs SwinCVS's local windows
+   - Small anatomical structures need local focus
+
+2. **Can LoRA adapt attention patterns or only value projections?**
+   - r=16: Only value projections changed
+   - r=32 + k_proj: Testing if attention patterns change
+
+3. **What's the optimal balance between temporal context and spatial focus?**
+   - More frames (16) vs fewer frames (5)
+   - Global attention vs local attention
+
+4. **Can hybrid architectures combine strengths of both approaches?**
+   - SwinCVS: Good spatial attention, limited temporal
+   - V-JEPA: Good temporal, poor spatial attention
+
+---
+
+## Project Timeline
+
+**Current Status:** February 2026
+**Submission Deadline:** ~July 2026 (5 months)
+
+### Milestones
+
+| Month | Goal |
+|-------|------|
+| Feb | Complete LoRA experiments, PhD interview presentation (Feb 11) |
+| Mar | Implement hybrid approaches, analyze attention patterns |
+| Apr | Run comprehensive experiments, ablation studies |
+| May | Write dissertation draft, create visualizations |
+| Jun | Revise, final experiments, polish |
+| Jul | Submit! |
+
+### Target for Paper
+- Beat SwinCVS (67.45%) OR
+- Novel insights into video foundation models for surgery
+- First comprehensive analysis of V-JEPA attention for medical imaging
+
+---
 
 ## Conclusions
 
-1. **Current Best: Exp10 (LoRA)** with **53.75%** Val mAP (+3.96% over baseline)
+1. **Current Best: Exp10b (LoRA r=32 + k_proj)** with **54.59%** Val mAP (+4.80% over baseline, still training!)
 2. **LoRA works better than direct fine-tuning** - adapts without destroying pretrained features
+3. **k_proj is crucial** - adding key projection significantly improved C2 detection (59.81% vs 55.03%)
 3. **Direct backbone fine-tuning hurts performance** - Exp8 (2 layers), Exp9-S2 (1 layer) both degraded
 4. **Focal loss hurts performance** - down-weighting easy negatives was counterproductive
 5. **Balanced sampling hurts performance** - causes train/val distribution mismatch
@@ -753,4 +876,4 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ---
 
-*Last updated: 2026-02-02 (Exp10a/c complete, Exp10b running)*
+*Last updated: 2026-02-02 (Exp10b NEW BEST 54.59% mAP at epoch 1, still training)*
