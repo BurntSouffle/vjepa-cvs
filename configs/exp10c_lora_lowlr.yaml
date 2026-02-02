@@ -1,0 +1,106 @@
+# Experiment 10c: Lower Learning Rate for Longer Training
+# ========================================================
+# Based on Exp10 which peaked at epoch 2 then declined.
+# Try lower LR to train longer without overfitting.
+#
+# Changes from Exp10:
+#   - lora_lr: 1e-4 -> 5e-5 (halved)
+#   - head_lr: 5e-4 -> 2.5e-4 (halved)
+#   - epochs: 15 -> 20 (more epochs)
+#   - warmup_epochs: 2 -> 3 (longer warmup)
+#   - patience: 5 -> 7 (allow more exploration)
+
+experiment:
+  name: "exp10c_lora_lowlr"
+  description: "Lower LR to train longer without overfitting"
+  hypothesis: >
+    Exp10 peaked at epoch 2 and declined after, suggesting LR was too high.
+    Halving the LR should allow more gradual learning and potentially
+    better final performance without early overfitting.
+  baseline: "exp10_lora (53.75% mAP at epoch 2, declined after)"
+
+# LoRA configuration (same as exp10)
+lora:
+  r: 16
+  lora_alpha: 32
+  target_modules:
+    - "q_proj"
+    - "v_proj"
+  lora_dropout: 0.1
+  bias: "none"
+
+# Model configuration (same as exp10)
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  hidden_dim: 1024
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+  num_seg_classes: 5
+  seg_output_size: 64
+  seg_dropout: 0.1
+
+# Training configuration - LOWER LR, MORE EPOCHS
+training:
+  epochs: 20                 # Increased from 15
+  batch_size: 64             # Running parallel, split batch
+  gradient_accumulation: 2   # Effective batch = 128
+  head_lr: 2.5e-4            # Halved from 5e-4
+  lora_lr: 5.0e-5            # Halved from 1e-4
+  weight_decay: 0.05
+  scheduler: "cosine"
+  warmup_epochs: 3           # Increased from 2
+  min_lr: 1.0e-7
+  early_stopping_patience: 7 # Increased from 5
+  num_workers: 8
+  mixed_precision: true
+  grad_clip: 1.0
+
+# Data paths (same as exp10)
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results/exp10c_lora_lowlr"
+
+# Dataset configuration
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  mask_resolution: 64
+  use_synthetic_masks: true
+
+# Data augmentation (same as exp10)
+augmentation:
+  horizontal_flip_prob: 0.5
+  rotation_degrees: 15
+  color_jitter:
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.2
+    hue: 0.1
+  random_erasing_prob: 0.2
+  gaussian_blur_prob: 0.1
+  gaussian_blur_sigma: [0.1, 2.0]
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3
+  cvs_pos_weight: [1.0, 3.0, 1.0]
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "balanced_accuracy"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_checkpoints: true
+
+# Reproducibility
+seed: 42
