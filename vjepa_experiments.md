@@ -550,11 +550,53 @@ Task Heads:                HOW to classify → Trained on surgical domain
 - **C2 AP: 60.34%** - Biggest improvement, +10% over baseline!
 - Peaked at epoch 1, then overfit rapidly
 
-**Why k_proj matters:**
-Adding k_proj means LoRA can modify how attention KEYS are computed, not just queries and values. This allows actual changes to attention patterns, not just value extraction.
+**Why k_proj matters (in theory):**
+Adding k_proj means LoRA can modify how attention KEYS are computed, not just queries and values.
 - **q_proj** affects query vectors (what to search for)
 - **k_proj** affects key vectors (what to match against) ← NEW
 - **v_proj** affects value vectors (what to output)
+
+---
+
+## Key Finding: k_proj Did NOT Change Attention Patterns
+
+### Attention Entropy Analysis
+
+| Model | Avg Entropy | vs Baseline | Interpretation |
+|-------|-------------|-------------|----------------|
+| Baseline V-JEPA | 98.4% | - | Nearly uniform |
+| Exp10a (r=16, q+v) | 97.9% | -0.5% | Still uniform |
+| **Exp10b (r=32, q+k+v)** | **97.9%** | **-0.5%** | **Still uniform** |
+
+**Critical Finding:** Despite adding k_proj and doubling the rank, Exp10b shows **identical entropy** to Exp10a!
+
+### What This Means
+
+1. **Performance gains came from better VALUE extraction, NOT attention focus**
+   - More parameters in q/k/v projections = more discriminative features
+   - But the model still attends uniformly to all spatial positions
+
+2. **V-JEPA's uniform attention is deeply ingrained**
+   - Self-supervised pretraining on natural videos created this behavior
+   - LoRA cannot fundamentally change this architecture
+
+3. **C2 improvement (60.34% AP) came from:**
+   - Better feature transformation in value projections
+   - NOT from attending more to cystic plate regions
+
+### Implications for Future Work
+
+To actually change WHERE V-JEPA attends, would need:
+- **Architectural changes** (window attention like SwinCVS)
+- **Attention supervision** (explicit loss on attention maps)
+- **Full fine-tuning** of attention layers (but this causes overfitting)
+
+### Visualizations
+See `visualizations/exp10b_attention_analysis/`:
+- `attention_comparison_all_lora.png` - Side-by-side heatmaps
+- `entropy_comparison.png` - Bar chart comparison
+- `c2_detection_analysis.png` - C2 predictions
+- `ANALYSIS_SUMMARY.md` - Full report
 
 ---
 
@@ -577,8 +619,10 @@ Adding k_proj means LoRA can modify how attention KEYS are computed, not just qu
 - `configs/exp10b_lora_r32.yaml` - Exp10b config
 - `configs/exp10c_lora_lowlr.yaml` - Exp10c config
 - `train_lora.py` - LoRA training script (requires `pip install peft`)
-- `analyze_exp10_lora_simple.py` - Attention analysis script
-- `visualizations/exp10_lora_analysis/` - Analysis visualizations
+- `analyze_exp10_lora_simple.py` - Exp10a attention analysis script
+- `analyze_exp10b_attention.py` - Exp10b attention analysis (compares all LoRA experiments)
+- `visualizations/exp10_lora_analysis/` - Exp10a analysis visualizations
+- `visualizations/exp10b_attention_analysis/` - Exp10b attention comparison (baseline vs 10a vs 10b)
 
 ---
 
@@ -587,9 +631,10 @@ Adding k_proj means LoRA can modify how attention KEYS are computed, not just qu
 1. **LoRA r=32 + k_proj is our best approach** - 54.61% mAP, 60.34% C2 AP
 2. **Higher LoRA rank = higher peak but earlier overfitting** - r=32 peaks at epoch 1, r=16 at epoch 2
 3. **C2 detection dramatically improved** - 60.34% vs ~50% baseline (+10%)
-4. **V-JEPA attention stays uniform** - LoRA improves via value/key projections, not attention focus
-5. **Overfitting is fundamental** - happens at epoch 1-3 regardless of LR or rank
-6. **Gap to SwinCVS: 12.84%** - significant progress but more work needed
+4. **k_proj did NOT change attention patterns** - Exp10b entropy (97.9%) = Exp10a entropy (97.9%)
+5. **Performance gains = better value extraction, NOT focused attention**
+6. **Overfitting is fundamental** - happens at epoch 1-3 regardless of LR or rank
+7. **Gap to SwinCVS: 12.84%** - may need architectural changes (window attention) to close
 
 ---
 
@@ -637,6 +682,13 @@ Based on experiments 2-10, here are the critical learnings:
 - r=32 + k_proj: peaks at epoch 1 (54.61% mAP)
 - More capacity = faster learning = faster overfitting
 - **For limited data: use high rank, train 1-2 epochs max**
+
+### 8. k_proj Does NOT Change Attention Patterns
+- Exp10a (r=16, q+v): 97.9% entropy
+- Exp10b (r=32, q+k+v): 97.9% entropy (SAME!)
+- Adding k_proj did not make attention more focused
+- **All performance gains came from value extraction, not attention focus**
+- V-JEPA's uniform attention is architecturally ingrained
 
 ---
 
@@ -905,4 +957,4 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ---
 
-*Last updated: 2026-02-02 (Exp10b COMPLETED - 54.61% mAP, 60.34% C2 AP - NEW RECORD)*
+*Last updated: 2026-02-02 (Exp10b attention analysis: k_proj did NOT change attention patterns - still 97.9% entropy)*
