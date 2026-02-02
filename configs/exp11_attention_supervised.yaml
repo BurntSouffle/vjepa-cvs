@@ -1,0 +1,127 @@
+# Experiment 11: Attention Supervision
+# =====================================
+# Force V-JEPA to attend to anatomical regions using mask supervision.
+#
+# Key insight from Exp10b: LoRA (even with k_proj) does NOT change attention patterns.
+# V-JEPA attention remains ~98% uniform. Performance gains came from value extraction.
+#
+# This experiment adds explicit attention supervision:
+# - Create target attention distribution from segmentation masks
+# - Add loss to penalize uniform attention, reward anatomy focus
+# - Goal: Make V-JEPA actually LOOK at the surgical structures
+#
+# Hypothesis: Directly supervising attention will break V-JEPA's uniform pattern
+# and improve CVS classification by focusing on relevant anatomy.
+
+experiment:
+  name: "exp11_attention_supervised"
+  description: "LoRA + attention supervision using segmentation masks"
+  hypothesis: >
+    Directly supervising attention with mask locations will make V-JEPA
+    attend to anatomical structures instead of uniformly across all patches.
+    This should reduce attention entropy from ~98% to <90% and improve
+    CVS classification, especially for C2 (cystic plate).
+  baseline: "exp10b (54.61% mAP, attention still 97.9% uniform)"
+
+# LoRA configuration (same as exp10b - our best)
+lora:
+  r: 32
+  lora_alpha: 64
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+  lora_dropout: 0.1
+  bias: "none"
+
+# Attention supervision configuration
+attention_supervision:
+  enabled: true
+  lambda: 0.1                    # Weight for attention loss (start small)
+  target: "mask"                 # Supervise attention to focus on mask regions
+  loss_type: "kl"                # KL divergence between attention and mask distribution
+  # Options: "kl", "mse", "focal", "entropy_penalty"
+  warmup_epochs: 1               # Don't apply attention loss in epoch 1
+  layer_idx: -1                  # Which transformer layer to supervise (-1 = last)
+  min_mask_coverage: 0.01        # Skip attention loss if mask covers <1% of image
+  entropy_target: 0.7            # Target entropy (0=focused, 1=uniform), only for entropy_penalty
+  normalize_target: true         # Normalize mask to probability distribution
+
+# Model configuration
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  hidden_dim: 1024
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+  num_seg_classes: 5
+  seg_output_size: 64
+  seg_dropout: 0.1
+
+# Training configuration
+training:
+  epochs: 10
+  batch_size: 32
+  gradient_accumulation: 4       # Effective batch = 128
+  head_lr: 5.0e-4
+  lora_lr: 1.0e-4
+  weight_decay: 0.05
+  scheduler: "cosine"
+  warmup_epochs: 1
+  min_lr: 1.0e-7
+  early_stopping_patience: 5
+  num_workers: 8
+  mixed_precision: true
+  grad_clip: 1.0
+
+# Data paths
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results/exp11_attention_supervised"
+
+# Dataset configuration
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  mask_resolution: 64
+  use_synthetic_masks: true
+
+# Data augmentation
+augmentation:
+  horizontal_flip_prob: 0.5
+  rotation_degrees: 15
+  color_jitter:
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.2
+    hue: 0.1
+  random_erasing_prob: 0.2
+  gaussian_blur_prob: 0.1
+  gaussian_blur_sigma: [0.1, 2.0]
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3
+  attention_weight: 0.1          # Start small, monitor stability
+  cvs_pos_weight: [1.0, 3.0, 1.0]
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "attention_entropy", "mask_overlap"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_checkpoints: true
+  log_attention_maps: true       # Save attention visualizations
+  attention_log_interval: 100    # Log attention maps every N batches
+
+# Reproducibility
+seed: 42

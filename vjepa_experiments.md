@@ -747,6 +747,7 @@ Training set imbalance:
 | 10a | LoRA r=16 | 7.52M | 53.75% | 55.03% | +3.96% | -13.70% |
 | 10c | LoRA r=16 low LR | 7.52M | 52.56% | 54.80% | +2.77% | -14.89% |
 | **10b** | **LoRA r=32 + k_proj** | **9.39M** | **54.61%** 🏆 | **60.34%** 🏆 | **+4.82%** | **-12.84%** |
+| 11 | LoRA + Attention Supervision | ~10M | 🔜 Planned | 🔜 | TBD | TBD |
 
 **Current Best: 54.61% mAP | Gap to SwinCVS (67.45%): 12.84%**
 
@@ -777,6 +778,76 @@ training:
   lora_lr: 1e-4
   head_lr: 5e-4
 ```
+
+---
+
+## Experiment 11: Attention Supervision - PLANNED
+
+### Hypothesis
+Directly supervising attention with segmentation masks will force V-JEPA to attend to anatomical regions instead of uniformly.
+
+### Motivation
+From Exp10b analysis:
+- V-JEPA attention entropy: 97.9% (nearly uniform)
+- LoRA (even with k_proj) did NOT change attention patterns
+- Performance gains came from value extraction, not attention focus
+
+**Key insight:** To change WHERE the model looks, need explicit supervision.
+
+### Approach
+Add attention supervision loss using segmentation masks:
+
+```python
+def attention_supervision_loss(attention_weights, mask):
+    """
+    Loss to make attention focus on anatomy regions.
+
+    1. Create target distribution from mask (non-background = high attention)
+    2. Compute KL divergence between V-JEPA attention and target
+    3. Penalize uniform attention, reward anatomy focus
+    """
+    # Resize mask to patch grid (16x16)
+    mask_patches = F.interpolate(mask, size=(16, 16), mode='nearest')
+
+    # Create target: high attention on anatomy, low on background
+    target = (mask_patches > 0).float()
+    target = target / (target.sum() + 1e-8)  # Normalize to distribution
+
+    # Get V-JEPA attention (average over heads)
+    attention = attention_weights.mean(dim=1)  # [B, tokens, tokens]
+    spatial_attention = attention.mean(dim=1)  # [B, tokens]
+
+    # KL divergence loss
+    return F.kl_div(spatial_attention.log(), target, reduction='batchmean')
+```
+
+### Configuration
+```yaml
+attention_supervision:
+  enabled: true
+  lambda: 0.1           # Start small, avoid destabilizing
+  warmup_epochs: 1      # Let model stabilize first
+  loss_type: "kl"       # KL divergence
+  min_mask_coverage: 0.01  # Skip if mask <1% of image
+
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3
+  attention_weight: 0.1  # New: attention supervision
+```
+
+### Expected Outcome
+- Reduce attention entropy from ~98% to <90%
+- Attention heatmaps should show focus on anatomical structures
+- May improve C2 detection (attention on cystic plate)
+- Risk: May destabilize training if lambda too high
+
+### Files
+- `configs/exp11_attention_supervised.yaml`
+- `train_attention_supervised.py`
+
+### Status
+READY TO RUN
 
 ---
 
@@ -957,4 +1028,4 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ---
 
-*Last updated: 2026-02-02 (Exp10b attention analysis: k_proj did NOT change attention patterns - still 97.9% entropy)*
+*Last updated: 2026-02-02 (Added Exp11: Attention Supervision using masks to force V-JEPA to attend to anatomy)*
