@@ -37,6 +37,69 @@ from tqdm import tqdm
 from dataset_multitask import MultiTaskCVSDataset
 from utils import load_config
 
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function that handles samples with/without masks.
+
+    Problem: Some samples have empty masks [0, 64, 64] while others have valid
+    masks [N, 64, 64]. PyTorch's default collate can't stack these together.
+
+    Solution: Pad empty masks with zeros and track which samples have valid masks.
+    """
+    # Stack videos and labels (always same size)
+    videos = torch.stack([b['video'] for b in batch])
+    labels = torch.stack([b['labels'] for b in batch])
+
+    # Handle masks - find max number of masks in batch
+    max_masks = max(b['masks'].shape[0] if b['masks'].shape[0] > 0 else 0 for b in batch)
+    max_masks = max(max_masks, 1)  # At least 1 for padding
+
+    mask_h = batch[0]['masks'].shape[-2] if batch[0]['masks'].dim() >= 2 else 64
+    mask_w = batch[0]['masks'].shape[-1] if batch[0]['masks'].dim() >= 2 else 64
+
+    masks_list = []
+    mask_indices_list = []
+    has_mask_list = []
+
+    for b in batch:
+        num_masks = b['masks'].shape[0] if b['masks'].shape[0] > 0 else 0
+
+        if num_masks > 0:
+            # Has valid masks
+            padded_masks = torch.zeros(max_masks, mask_h, mask_w, dtype=b['masks'].dtype)
+            padded_masks[:num_masks] = b['masks']
+            masks_list.append(padded_masks)
+
+            # Pad mask indices
+            padded_indices = torch.full((max_masks,), -1, dtype=torch.long)
+            padded_indices[:num_masks] = b['mask_indices'][:num_masks]
+            mask_indices_list.append(padded_indices)
+
+            has_mask_list.append(True)
+        else:
+            # No valid masks - create dummy
+            masks_list.append(torch.zeros(max_masks, mask_h, mask_w, dtype=torch.long))
+            mask_indices_list.append(torch.full((max_masks,), -1, dtype=torch.long))
+            has_mask_list.append(False)
+
+    masks = torch.stack(masks_list)
+    mask_indices = torch.stack(mask_indices_list)
+    has_mask = torch.tensor(has_mask_list, dtype=torch.bool)
+
+    # Copy metadata
+    meta = [b['meta'] for b in batch]
+
+    return {
+        'video': videos,
+        'labels': labels,
+        'masks': masks,
+        'mask_indices': mask_indices,
+        'has_mask': has_mask,  # Boolean tensor indicating which samples have valid masks
+        'meta': meta,
+    }
+
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -611,16 +674,20 @@ def train_epoch(
         labels = batch["labels"].float().to(device)
         masks = batch["masks"].to(device) if "masks" in batch else None
         mask_indices = batch["mask_indices"]
+        has_mask = batch["has_mask"].to(device) if "has_mask" in batch else None
 
         # Process videos
         pixel_values = model.process_videos(videos, device)
 
-        # Prepare segmentation targets
+        # Prepare segmentation targets (only for samples WITH masks)
         frame_indices = []
         batch_indices = []
         seg_targets = []
 
         for b_idx in range(len(mask_indices)):
+            # Skip samples without valid masks
+            if has_mask is not None and not has_mask[b_idx]:
+                continue
             for m_idx, frame_idx in enumerate(mask_indices[b_idx]):
                 if frame_idx >= 0:
                     frame_indices.append(frame_idx)
@@ -656,23 +723,28 @@ def train_epoch(
                     seg_targets.to(device)
                 )
 
-            # Attention supervision loss
+            # Attention supervision loss (only for samples WITH masks)
             attn_loss = torch.tensor(0.0, device=device)
             if apply_attn_loss and outputs.get("attention_weights") is not None:
-                # Create attention target from middle frame mask
-                # Use the mask for the middle temporal position
-                if masks is not None:
+                # Only compute attention loss for samples that have valid masks
+                if masks is not None and has_mask is not None and has_mask.any():
+                    # Use first mask (middle frame) for attention target
                     middle_mask = masks[:, 0] if masks.dim() == 4 else masks
-                    attention_target, valid_mask = create_attention_target(
+
+                    # Create attention target
+                    attention_target, valid_coverage = create_attention_target(
                         middle_mask,
                         min_coverage=min_mask_coverage,
                     )
+
+                    # Combine has_mask with coverage check
+                    valid_mask = has_mask & valid_coverage.to(device)
 
                     if valid_mask.any():
                         attn_loss = attention_supervision_loss(
                             outputs["attention_weights"],
                             attention_target.to(device),
-                            valid_mask.to(device),
+                            valid_mask,
                             loss_type=attn_loss_type,
                         )
 
@@ -891,6 +963,7 @@ def main():
         num_workers=train_cfg.get("num_workers", 8),
         pin_memory=True,
         drop_last=True,
+        collate_fn=custom_collate_fn,  # Handle variable mask sizes
     )
 
     val_loader = DataLoader(
@@ -899,6 +972,7 @@ def main():
         shuffle=False,
         num_workers=train_cfg.get("num_workers", 8),
         pin_memory=True,
+        collate_fn=custom_collate_fn,  # Handle variable mask sizes
     )
 
     # Create optimizer with separate LR for LoRA and heads
