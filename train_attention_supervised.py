@@ -680,7 +680,8 @@ def train_epoch(
         loss_cfg.get("seg_class_weights", [0.1, 5.0, 3.0, 2.0, 2.0]),
         device=device
     )
-    seg_criterion = nn.CrossEntropyLoss(weight=seg_class_weights, ignore_index=-1)
+    num_seg_classes = len(seg_class_weights)  # 5 classes: 0-4
+    seg_criterion = nn.CrossEntropyLoss(weight=seg_class_weights, ignore_index=255)
 
     # Metrics
     total_loss = 0.0
@@ -747,9 +748,14 @@ def train_epoch(
             # Segmentation loss
             seg_loss = torch.tensor(0.0, device=device)
             if "seg_logits" in outputs and seg_targets is not None:
+                # Fix mask values: set out-of-range class indices to ignore_index (255)
+                seg_targets_fixed = seg_targets.clone().to(device)
+                seg_targets_fixed[seg_targets_fixed >= num_seg_classes] = 255
+                seg_targets_fixed[seg_targets_fixed < 0] = 255
+
                 seg_loss = seg_criterion(
                     outputs["seg_logits"],
-                    seg_targets.to(device)
+                    seg_targets_fixed
                 )
 
             # Attention supervision loss (only for samples WITH masks)
