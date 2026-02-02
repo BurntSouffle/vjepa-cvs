@@ -441,7 +441,11 @@ Exp9 confirmed that even minimal backbone fine-tuning hurts performance. LoRA of
 - Learns domain-specific adaptations through low-rank matrices
 - Much smaller parameter count reduces overfitting risk
 
-### Configuration
+---
+
+### Exp10a: Baseline LoRA (r=16) - **BEST RESULT** 🏆
+
+**Settings:**
 | Setting | Value |
 |---------|-------|
 | LoRA rank (r) | 16 |
@@ -453,36 +457,29 @@ Exp9 confirmed that even minimal backbone fine-tuning hurts performance. LoRA of
 | Total trainable | 7.52M (2.25%) |
 | LoRA LR | 1e-4 |
 | Head LR | 5e-4 |
-| Scheduler | Cosine with 13% warmup |
 
-### Results
+**Results:**
 | Epoch | Train mAP | Val mAP | C1 AP | C2 AP | C3 AP |
 |-------|-----------|---------|-------|-------|-------|
 | 1 | 25.32% | 43.79% | 40.81% | 48.89% | 41.66% |
-| 2 | 64.34% | **53.75%** | 50.69% | 55.03% | 55.54% |
+| 2 | 64.34% | **53.75%** 🏆 | 50.69% | 55.03% | 55.54% |
 | 3 | 78.01% | 52.99% | 49.75% | 55.40% | 53.82% |
 
-**Best Result: 53.75% Val mAP (Epoch 2)** - **NEW BEST! +3.81% over baseline**
+**Best: 53.75% mAP (Epoch 2)** - New record! +3.96% over baseline
 
-### Attention Analysis: Key Finding
+**Checkpoint:** `results/exp10_lora/run_20260201_203545/best_model.pt`
 
-Extracted internal attention from LoRA-adapted model and compared to baseline:
+---
 
-| Model | Entropy | Interpretation |
-|-------|---------|----------------|
-| Baseline V-JEPA | 98.4% | Nearly uniform |
-| LoRA V-JEPA | 97.9% | Nearly uniform |
-| **Change** | **0.5%** | Minimal |
+### Key Finding: LoRA Did NOT Change Attention Patterns
 
-**Critical Finding:** LoRA did NOT significantly change V-JEPA's internal attention patterns. The attention remains ~98% uniform (nearly maximum entropy).
+| Model | Attention Entropy |
+|-------|-------------------|
+| Baseline V-JEPA | 98.4% (uniform) |
+| LoRA V-JEPA | 97.9% (still uniform) |
+| **Change** | **0.5%** (minimal) |
 
-### How LoRA Improved Performance Without Changing Attention
-
-Since attention patterns didn't change, the 53.75% mAP improvement came from:
-
-1. **LoRA VALUE projections** - Modified WHAT the model outputs, not WHERE it looks
-2. **Better feature transformations** - Low-rank updates create more discriminative features
-3. **Trained task heads** - Attention pooler + CVS classifier adapted to surgical domain
+LoRA improved performance by modifying VALUE projections (what gets extracted), not attention patterns (where to look).
 
 ```
 V-JEPA Internal Attention: WHERE to look → Still uniform (~98%)
@@ -490,7 +487,7 @@ LoRA Value Projections:    WHAT to output → Modified to be more discriminative
 Task Heads:                HOW to classify → Trained on surgical domain
 ```
 
-### Sample Predictions Analysis
+### Sample Predictions Analysis (Exp10a)
 
 | Sample | Type | GT Labels | Predictions | Accuracy |
 |--------|------|-----------|-------------|----------|
@@ -501,75 +498,79 @@ Task Heads:                HOW to classify → Trained on surgical domain
 
 **Pattern:** Strong on clear cases (negatives, full CVS), weak on single-criterion samples.
 
-### Files
-- `configs/exp10_lora.yaml` - Experiment config
-- `train_lora.py` - LoRA training script (requires `pip install peft`)
-- `analyze_exp10_lora_simple.py` - Attention analysis script
-- `visualizations/exp10_lora_analysis/` - Analysis visualizations
+---
 
-### Checkpoint
-`results/exp10_lora/run_20260201_203545/best_model.pt`
+### Exp10c: Lower Learning Rate - COMPLETED
+
+**Hypothesis:** Lower LR will allow training past epoch 2 without overfitting
+
+**Settings:**
+| Setting | Exp10a | Exp10c |
+|---------|--------|--------|
+| LoRA LR | 1e-4 | 5e-5 (halved) |
+| Head LR | 5e-4 | 2.5e-4 (halved) |
+| Warmup | 2 epochs | 3 epochs |
+| Epochs | 15 | 20 |
+| Patience | 5 | 7 |
+
+**Results:**
+| Epoch | Train mAP | Val mAP | C1 AP | C2 AP | C3 AP |
+|-------|-----------|---------|-------|-------|-------|
+| 1 | 22.98% | 38.68% | 37.25% | 41.87% | 36.92% |
+| 2 | 60.48% | 48.90% | 48.86% | 50.13% | 47.70% |
+| 3 | 77.01% | **52.56%** | 48.43% | 54.80% | 54.45% |
+| 4 | 83.01% | 46.53% | 41.56% | 48.89% | 49.15% |
+
+**Best: 52.56% mAP (Epoch 3)**
+
+**Conclusion:** Lower LR shifted peak from epoch 2 to epoch 3, but didn't prevent overfitting or reach higher mAP. Still -1.19% below Exp10a.
 
 ---
 
-## Experiment 10b: Higher Rank LoRA + Key Projection - PLANNED
+### Exp10b: Higher Rank LoRA (r=32 + k_proj) - RUNNING 🔄
 
-### Hypothesis
-Higher rank (32 vs 16) gives more capacity to modify attention patterns. Adding k_proj allows modifying WHERE the model attends, not just WHAT it outputs.
+**Hypothesis:** More LoRA capacity + targeting k_proj might change attention patterns
 
-### Changes from Exp10
-| Setting | Exp10 | Exp10b |
-|---------|-------|--------|
-| Rank | 16 | **32** |
-| Alpha | 32 | **64** |
-| Targets | q_proj, v_proj | **q_proj, k_proj, v_proj** |
-| Batch | 32 | 64 (parallel) |
+**Settings:**
+| Setting | Exp10a | Exp10b |
+|---------|--------|--------|
+| LoRA r | 16 | 32 (2x) |
+| LoRA alpha | 32 | 64 |
+| Target modules | q, v | q, k, v |
+| LoRA params | 1.87M | ~4M |
 
-### Motivation
-Exp10 analysis showed attention entropy only reduced by 0.5%. Adding k_proj targets the key projection which directly affects attention computation:
+**Motivation:** Exp10a showed attention entropy only reduced 0.5%. Adding k_proj targets the key projection which directly affects attention computation:
 - **q_proj** affects query vectors (what to search for)
 - **k_proj** affects key vectors (what to match against) ← NEW
 - **v_proj** affects value vectors (what to output)
 
-### Configuration
-- `configs/exp10b_lora_r32.yaml`
+Training in progress...
 
 ---
 
-## Experiment 10c: Lower Learning Rate - PLANNED
-
-### Hypothesis
-Exp10 peaked at epoch 2 and declined after, suggesting LR was too high. Halving the LR should allow more gradual learning and potentially better final performance.
-
-### Changes from Exp10
-| Setting | Exp10 | Exp10c |
-|---------|-------|--------|
-| LoRA LR | 1e-4 | **5e-5** |
-| Head LR | 5e-4 | **2.5e-4** |
-| Epochs | 15 | **20** |
-| Warmup | 2 | **3** |
-| Patience | 5 | **7** |
-
-### Motivation
-The mAP declined from 53.75% (epoch 2) to 52.99% (epoch 3), indicating overfitting. Lower LR + more epochs may find a better optimum.
-
-### Configuration
-- `configs/exp10c_lora_lowlr.yaml`
-
-### To Run Both in Parallel
-```bash
-# Terminal 1
-python train_lora.py --config configs/exp10b_lora_r32.yaml
-
-# Terminal 2
-python train_lora.py --config configs/exp10c_lora_lowlr.yaml
-```
+### Files
+- `configs/exp10_lora.yaml` - Exp10a config
+- `configs/exp10b_lora_r32.yaml` - Exp10b config
+- `configs/exp10c_lora_lowlr.yaml` - Exp10c config
+- `train_lora.py` - LoRA training script (requires `pip install peft`)
+- `analyze_exp10_lora_simple.py` - Attention analysis script
+- `visualizations/exp10_lora_analysis/` - Analysis visualizations
 
 ---
 
-## Key Insights So Far
+## Key Insights
 
-Based on experiments 2-8, here are the critical learnings:
+1. **LoRA is the winner** - 53.75% mAP, +3.96% over baseline
+2. **V-JEPA attention stays uniform** - LoRA improves via value projections, not attention focus
+3. **Overfitting happens at epoch 2-3** - regardless of LR, approach, or architecture
+4. **Fine-tuning backbone hurts** - frozen backbone + LoRA adapters works best
+5. **C2 detection improved** - 55.03% AP (was ~50% at baseline)
+
+---
+
+## Key Insights (Detailed)
+
+Based on experiments 2-10, here are the critical learnings:
 
 ### 1. V-JEPA's Internal Attention is Uniform (~95-98% entropy)
 - V-JEPA doesn't naturally focus on surgical anatomy
@@ -670,14 +671,14 @@ Training set imbalance:
 | 4 | Balanced sampling | 5.7M | 46.90% | -2.89% ❌ |
 | 6 | C2-weighted loss | 5.7M | 49.79% | +0.00% |
 | 8 | Multi-task, unfreeze 2 | 30.8M | 48.03% | -1.76% ❌ |
-| 9-S1 | Staged, frozen | 5.7M | 49.94% | +0.15% ✅ |
+| 9-S1 | Staged, frozen | 5.7M | 49.94% | +0.15% |
 | 9-S2 | Staged, unfreeze 1 | ~18M | 48.49% | -1.30% ❌ |
-| **10** | **LoRA (r=16, q+v)** | 7.52M | **53.75%** | **+3.96%** ✅ **BEST** |
-| 10b | LoRA (r=32, q+k+v) | ~10M | 📋 Planned | TBD |
-| 10c | LoRA (low LR) | 7.52M | 📋 Planned | TBD |
+| **10a** | **LoRA r=16 (q+v)** | **7.52M** | **53.75%** | **+3.96%** 🏆 |
+| 10c | LoRA r=16 low LR | 7.52M | 52.56% | +2.77% |
+| 10b | LoRA r=32 (q+k+v) | ~10M | 🔄 Running | TBD |
 
 ### Key Takeaway
-**LoRA is the best approach.** It adapts V-JEPA without destroying pretrained features. Direct fine-tuning always hurts performance.
+**LoRA is the best approach.** Exp10a achieved 53.75% mAP (+3.96% over baseline). Direct fine-tuning always hurts performance.
 
 ## Conclusions
 
@@ -752,4 +753,4 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ---
 
-*Last updated: 2026-02-02*
+*Last updated: 2026-02-02 (Exp10a/c complete, Exp10b running)*
