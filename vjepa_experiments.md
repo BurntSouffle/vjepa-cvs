@@ -626,6 +626,49 @@ See `visualizations/exp10b_attention_analysis/`:
 
 ---
 
+## Layer-by-Layer Entropy Analysis (Exp10b Model)
+
+Analyzed attention entropy across all 24 transformer layers of V-JEPA with LoRA r=32 + k_proj.
+
+### Results
+
+| Layer | Entropy | Notes |
+|-------|---------|-------|
+| 0 | 97.8% | Early layer |
+| 6 | 99.6% | Most uniform |
+| 12 | ~99% | Middle layer |
+| 22 | **94.8%** | **Most focused** (still very uniform) |
+| 23 | 98.3% | Final layer |
+
+### Key Findings
+
+1. **All 24 layers have near-uniform attention** (94.8% - 99.6% entropy)
+2. **Early layers get MORE uniform** (97.8% → 99.6% from layer 0→6)
+3. **Layer 22 is slightly more focused** but still 94.8% entropy
+4. **Final layer (23) returns to uniform** at 98.3%
+5. **Some samples hit 100% entropy** - perfectly uniform, no spatial differentiation
+
+### Visualization
+```
+Layer:    0    6    12   18   22   23
+Entropy: 97.8→99.6→99.0→98.5→94.8→98.3
+      ↑              ↓    ↑
+   uniform      slight  back to
+                focus   uniform
+```
+
+### Implications
+
+- LoRA cannot meaningfully change attention at ANY layer
+- Even the "most focused" layer (22) is still 94.8% uniform
+- **Hard attention masking (Exp12) is necessary** - training-based approaches failed at all layers
+
+### Files
+- `analyze_layer_entropy.py` - Analysis script
+- `visualizations/layer_entropy_analysis/exp10b/` - Bar chart, heatmaps, CSV data
+
+---
+
 ## Key Insights
 
 1. **LoRA improves V-JEPA performance** - 54.61% mAP (+4.82% over baseline)
@@ -740,14 +783,14 @@ Training set imbalance:
 
 ## Summary Table
 
-| Exp | Approach | Val mAP | Entropy | Notes |
-|-----|----------|---------|---------|-------|
-| 2 | Baseline (frozen) | 49.79% | 98.4% | Baseline |
-| 10a | LoRA r=16 | 53.75% | 97.9% | +3.96%, entropy unchanged |
-| 10b | LoRA r=32 + k_proj | **54.61%** | 97.9% | Best mAP, entropy still unchanged |
-| 10c | LoRA r=16 low LR | 52.56% | ~98% | Lower LR didn't help |
-| 11 | Attention supervision (lambda=0.1) | 43.70% | 99.2% | Entropy barely changed |
-| 11 | Attention supervision (lambda=1.0) | Running | ? | Testing aggressive lambda |
+| Exp | Approach | Val mAP | Entropy | Peak Epoch | Status |
+|-----|----------|---------|---------|------------|--------|
+| 2 | Baseline (frozen) | 49.79% | 98.4% | 2 | ✅ |
+| 10a | LoRA r=16 | 53.75% | 97.9% | 2 | ✅ |
+| 10b | LoRA r=32 + k_proj | **54.61%** | 97.9% | 1 | ✅ Best mAP |
+| 10c | LoRA low LR | 52.56% | ~98% | 3 | ✅ |
+| 11 | Attention supervision | 49.77% | 99.2% | - | ❌ Failed |
+| 12 | Hard masking + regularization | ? | ? | ? | 🔄 Running |
 
 **Current Best: 54.61% mAP | Gap to SwinCVS (67.45%): 12.84%**
 
@@ -781,34 +824,66 @@ training:
 
 ---
 
-## Exp11: Attention Supervision - IN PROGRESS
+## Exp11: Attention Supervision - COMPLETED ❌
 
-### Hypothesis
-Directly supervising attention with segmentation masks will force V-JEPA to attend to anatomy instead of uniformly.
+### Result: FAILED
 
-### Setup
-| Setting | Value |
-|---------|-------|
-| Base | LoRA r=32 + k_proj (same as Exp10b) |
-| Attention supervision | KL divergence loss |
-| Target | Attention should focus on mask regions |
-| Lambda (attention weight) | 0.1 -> **1.0** (increased) |
-| Mask coverage | 51.2% of clips |
+Even with aggressive attention supervision (λ=1.0), entropy remained at 99.2-99.4%.
 
-### Results (lambda=0.1)
-| Epoch | Train mAP | Val mAP | Attention Loss | Entropy |
-|-------|-----------|---------|----------------|---------|
-| 1 | 38.87% | 37.88% | 3.60 | 99.5% |
-| 2 | 62.09% | 43.70% | 3.59 | 99.2% |
-| 3 | 72.23% | ~45% | 3.58 | 99.3% |
+| Lambda | Entropy Change | Result |
+|--------|----------------|--------|
+| 0.1 | 99.5% → 99.2% | -0.3% |
+| 1.0 | 99.3% → 99.4% | **+0.1% (worse!)** |
 
-**Key Finding: Entropy barely changed (99.5% -> 99.2%)** - attention supervision with lambda=0.1 is too weak.
-
-Now testing with lambda=1.0 (10x stronger)...
+**Conclusion:** V-JEPA's attention patterns cannot be changed through training loss. Attention supervision actually made entropy slightly WORSE.
 
 ### Files
 - `configs/exp11_attention_supervised.yaml`
 - `train_attention_supervised.py`
+
+---
+
+## Exp12: Strong Regularization + Hard Attention Masking - RUNNING 🔄
+
+### Hypothesis
+Based on external feedback: Instead of trying to TRAIN attention to focus, FORCE it architecturally.
+
+### Key Changes from Exp10b
+
+| Component | Exp10b | Exp12 |
+|-----------|--------|-------|
+| MixUp | ❌ | ✅ α=0.8 |
+| CutMix | ❌ | ✅ α=1.0 |
+| Label Smoothing | ❌ | ✅ 0.1 |
+| Weight Decay | 0.05 | **0.1** |
+| Warmup | 2 epochs | **0.5 epochs** |
+| Attention | Uniform (98%) | **Hard masked** |
+
+### Hard Attention Masking
+```python
+# Instead of soft supervision:
+loss = cvs_loss + λ * attention_loss  # ❌ Failed
+
+# We now FORCE focus:
+attention = attention * anatomy_mask  # ✅ Architectural
+attention = attention / attention.sum()  # Re-normalize
+```
+
+The model physically CANNOT attend to background tokens.
+
+### Expected Outcome
+
+| Metric | Exp10b | Exp12 Target |
+|--------|--------|--------------|
+| Peak Epoch | 1 | **3-5** (delayed) |
+| Val mAP | 54.61% | Higher |
+| Overfitting | Severe | **Reduced** |
+
+Training in progress...
+
+### Files
+- `configs/exp12_regularized.yaml`
+- `train_regularized.py`
 
 ---
 
@@ -1142,4 +1217,4 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ---
 
-*Last updated: 2026-02-03 (Added V-JEPA architecture deep dive and future experiment ideas)*
+*Last updated: 2026-02-03 (Added layer entropy analysis, Exp11 completed as failed, Exp12 running)*
