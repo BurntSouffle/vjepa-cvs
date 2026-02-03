@@ -1,0 +1,123 @@
+# Experiment 12: Strong Regularization + Hard Attention Masking
+# ==============================================================
+# Based on Exp10b analysis. Add strong regularization (MixUp, CutMix,
+# label smoothing, higher weight decay) and hard attention masking
+# to physically prevent the model from attending to background regions.
+#
+# Changes from Exp10b:
+#   - weight_decay: 0.05 -> 0.1
+#   - label_smoothing: 0.1 (new)
+#   - warmup_epochs: 2 -> 0.5
+#   - MixUp + CutMix augmentation (new)
+#   - Hard attention masking from segmentation masks (new)
+
+experiment:
+  name: "exp12_regularized"
+  description: "Strong regularization (MixUp/CutMix/label smoothing) + hard attention masking"
+  hypothesis: >
+    V-JEPA attention remains ~98% uniform despite LoRA adaptation.
+    Strong regularization forces more generalizable features.
+    Hard attention masking physically zeroes background tokens,
+    forcing the model to rely only on anatomically relevant regions.
+  baseline: "exp10b_lora_r32 (LoRA r=32 with q/k/v_proj)"
+
+# LoRA configuration - same as exp10b
+lora:
+  r: 32
+  lora_alpha: 64
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+  lora_dropout: 0.1
+  bias: "none"
+
+# Model configuration (same as exp10b)
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  hidden_dim: 1024
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+  num_seg_classes: 5
+  seg_output_size: 64
+  seg_dropout: 0.1
+
+# Training configuration - stronger regularization
+training:
+  epochs: 15
+  batch_size: 64
+  gradient_accumulation: 2
+  head_lr: 5.0e-4
+  lora_lr: 1.0e-4
+  weight_decay: 0.1              # Increased from 0.05
+  label_smoothing: 0.1            # New: smooth binary CVS labels
+  scheduler: "cosine"
+  warmup_epochs: 0.5              # Reduced from 2
+  min_lr: 1.0e-7
+  early_stopping_patience: 5
+  num_workers: 8
+  mixed_precision: true
+  grad_clip: 1.0
+  drop_path_rate: 0.1             # Documented but not implemented (backbone is frozen)
+
+# Data paths
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results/exp12_regularized"
+
+# Dataset configuration
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  mask_resolution: 64
+  use_synthetic_masks: true
+
+# Data augmentation - added MixUp and CutMix
+augmentation:
+  horizontal_flip_prob: 0.5
+  rotation_degrees: 15
+  color_jitter:
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.2
+    hue: 0.1
+  random_erasing_prob: 0.2
+  gaussian_blur_prob: 0.1
+  gaussian_blur_sigma: [0.1, 2.0]
+  mixup_alpha: 0.8
+  cutmix_alpha: 1.0
+  mixup_prob: 0.5
+  cutmix_prob: 0.5
+
+# Hard attention masking configuration
+hard_attention_masking:
+  enabled: true
+  spatial_size: 16
+  mask_value: 0.0
+  apply_during_training: true
+  apply_during_eval: false
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3
+  cvs_pos_weight: [1.0, 3.0, 1.0]
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "balanced_accuracy"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_checkpoints: true
+
+# Reproducibility
+seed: 42
