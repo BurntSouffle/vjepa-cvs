@@ -977,6 +977,8 @@ def main():
         mask_resolution=dataset_cfg.get("mask_resolution", 64),
         augment=True,
         use_synthetic_masks=dataset_cfg.get("use_synthetic_masks", True),
+        gt_masks_dir=data_cfg.get("gt_masks_dir"),
+        synthetic_masks_dir=data_cfg.get("synthetic_masks_dir"),
     )
 
     val_dataset = MultiTaskCVSDataset(
@@ -987,6 +989,8 @@ def main():
         mask_resolution=dataset_cfg.get("mask_resolution", 64),
         augment=False,
         use_synthetic_masks=dataset_cfg.get("use_synthetic_masks", True),
+        gt_masks_dir=data_cfg.get("gt_masks_dir"),
+        synthetic_masks_dir=data_cfg.get("synthetic_masks_dir"),
     )
 
     train_cfg = config.get("training", {})
