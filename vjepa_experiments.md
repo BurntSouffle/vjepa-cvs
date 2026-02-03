@@ -850,6 +850,121 @@ V-JEPA was trained to predict masked video patches. This requires attending to E
 
 ---
 
+## V-JEPA Architecture Deep Dive
+
+### Data Flow
+
+```
+Input: Video [B, T, C, H, W]
+│
+▼
+┌─────────────────────────────────────┐
+│     3D Patch Embedding              │
+│     [B, 16, 3, 256, 256] ->         │
+│     [B, 2048, 1024]                 │
+│     (8 temporal x 256 spatial)      │
+└─────────────────────────────────────┘
+│
+▼
+┌─────────────────────────────────────┐
+│     Transformer Encoder             │
+│     24 layers (ViT-L)               │
+│                                     │
+│   Each layer:                       │
+│   x = x + attention(x)  <- Skip #1 │
+│   x = x + mlp(x)        <- Skip #2 │
+│                                     │
+└─────────────────────────────────────┘
+│
+▼
+Output: [B, 2048, 1024]
+```
+
+### Key Architectural Properties
+
+| Property | V-JEPA | Implication |
+|----------|--------|-------------|
+| Skip connections | Yes (2 per layer) | Preserves input signal, stabilizes training |
+| Attention type | Global (all tokens) | Every token attends to all 2048 tokens |
+| Layers | 24 (ViT-L) | Deep network, 307M params |
+| Tokens | 2048 (8 temporal x 256 spatial) | Large attention matrix (2048x2048) |
+
+### Why Uniform Attention Persists Through Skip Connections
+
+```
+Layer 0:  Input tokens all similar (patches)
+          -> Attention spreads evenly
+          -> Skip connection preserves this
+Layer 12: Tokens slightly differentiated
+          -> Attention still fairly uniform
+          -> Skip connection preserves this
+Layer 23: Final representations
+          -> Attention STILL uniform
+          -> Skip connections preserved uniform pattern throughout
+```
+
+The residual connections let information flow without forcing attention to focus.
+
+---
+
+### Ideas for Future Experiments
+
+#### 1. Layer Pruning
+```python
+# Reduce from 24 to 12 layers
+model.encoder.layers = model.encoder.layers[:12]
+# ~150M params instead of 307M
+```
+Risk: May break pretrained features
+
+#### 2. U-Net Style Skip Connections
+```
+Layer 0  ----------------------> Layer 23
+Layer 6  ----------------------> Layer 18
+Layer 12 ----------------------> Layer 12
+```
+Let early features (edges, textures) directly influence late layers.
+
+#### 3. Feature Pyramid
+```python
+# Combine multi-scale features
+features = concat([layer_6_out, layer_12_out, layer_23_out])
+```
+Early layers: local features, Late layers: global context
+
+#### 4. Attention Bias Injection
+```python
+# Add mask-based bias to attention
+attention = softmax(Q @ K^T + mask_bias)
+# Boost attention on anatomy regions
+```
+
+#### 5. Per-Layer Attention Analysis
+Analyze which layers have most/least uniform attention:
+```python
+for i, layer in enumerate(model.encoder.layers):
+    entropy = compute_entropy(extract_attention(layer))
+    print(f"Layer {i}: Entropy = {entropy}%")
+```
+This could reveal where to intervene.
+
+---
+
+### Comparison: V-JEPA vs SwinCVS Architecture
+
+| Aspect | V-JEPA | SwinCVS |
+|--------|--------|---------|
+| Attention | Global (2048x2048) | Window (24x24) |
+| Skip connections | Within-layer residual | Within-layer residual |
+| Layers | 24 | ~24 (Swin-B) |
+| Params | 307M | 88M |
+| Pretraining | Self-supervised video | ImageNet supervised |
+| Result | 54.61% mAP | 67.45% mAP |
+
+**Key difference:** SwinCVS's window attention forces local focus, which is better for finding small surgical structures.
+
+---
+
 ## Future Directions & Hybrid Ideas
 
 ### Goal: Beat SwinCVS (67.45% mAP)
@@ -1027,4 +1142,4 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ---
 
-*Last updated: 2026-02-03 (Added Exp11 results: attention supervision too weak at lambda=0.1, V-JEPA attention rigidity analysis)*
+*Last updated: 2026-02-03 (Added V-JEPA architecture deep dive and future experiment ideas)*
