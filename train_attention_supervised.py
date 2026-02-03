@@ -559,7 +559,12 @@ class AttentionSupervisedModel(nn.Module):
                     )
 
     def _compute_attention_from_qk(self) -> Optional[torch.Tensor]:
-        """Compute attention weights from captured Q and K."""
+        """Compute attention weights from captured Q and K.
+
+        Returns mean attention over queries, computed in chunks to avoid OOM.
+        Shape: [B, num_heads, 1, seq_len] (query dimension is averaged out).
+        All downstream consumers reduce over queries anyway, so this is lossless.
+        """
         if self._q_output is None or self._k_output is None:
             return None
 
@@ -574,12 +579,24 @@ class AttentionSupervisedModel(nn.Module):
         Q = Q.view(B, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
         K = K.view(B, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
 
-        # Compute attention
+        # Compute attention in chunks to avoid OOM.
+        # Full matrix would be [B, H, seq_len, seq_len] (~8GB at B=32, seq=2048).
+        # Instead, process query chunks and accumulate the mean over queries.
         scale = head_dim ** -0.5
-        attn = torch.matmul(Q, K.transpose(-2, -1)) * scale
-        attn = torch.softmax(attn, dim=-1)
+        K_t = K.transpose(-2, -1)  # [B, H, head_dim, seq_len]
+        chunk_size = 256
+        attn_sum = torch.zeros(B, num_heads, 1, seq_len, device=Q.device, dtype=Q.dtype)
 
-        return attn
+        for i in range(0, seq_len, chunk_size):
+            end = min(i + chunk_size, seq_len)
+            # [B, H, chunk, seq_len]
+            chunk_attn = torch.matmul(Q[:, :, i:end, :], K_t) * scale
+            chunk_attn = torch.softmax(chunk_attn, dim=-1)
+            # Accumulate sum over query dimension
+            attn_sum += chunk_attn.sum(dim=2, keepdim=True)
+
+        attn_mean = attn_sum / seq_len
+        return attn_mean
 
     def process_videos(self, videos: torch.Tensor, device: torch.device) -> torch.Tensor:
         """Process videos for V-JEPA input."""
