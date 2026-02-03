@@ -628,13 +628,12 @@ See `visualizations/exp10b_attention_analysis/`:
 
 ## Key Insights
 
-1. **LoRA r=32 + k_proj is our best approach** - 54.61% mAP, 60.34% C2 AP
-2. **Higher LoRA rank = higher peak but earlier overfitting** - r=32 peaks at epoch 1, r=16 at epoch 2
-3. **C2 detection dramatically improved** - 60.34% vs ~50% baseline (+10%)
-4. **k_proj did NOT change attention patterns** - Exp10b entropy (97.9%) = Exp10a entropy (97.9%)
-5. **Performance gains = better value extraction, NOT focused attention**
-6. **Overfitting is fundamental** - happens at epoch 1-3 regardless of LR or rank
-7. **Gap to SwinCVS: 12.84%** - may need architectural changes (window attention) to close
+1. **LoRA improves V-JEPA performance** - 54.61% mAP (+4.82% over baseline)
+2. **LoRA does NOT change attention patterns** - entropy stays ~98% regardless of rank
+3. **V-JEPA's uniform attention is deeply ingrained** - from self-supervised pretraining on millions of videos
+4. **Attention supervision (lambda=0.1) too weak** - entropy only dropped 0.3%
+5. **Performance gains come from better value extraction**, not focused attention
+6. **To change WHERE V-JEPA looks, need architectural changes** (window attention) not just training tricks
 
 ---
 
@@ -741,13 +740,14 @@ Training set imbalance:
 
 ## Summary Table
 
-| Exp | Approach | Params | Val mAP | C2 AP | vs Baseline | vs SwinCVS |
-|-----|----------|--------|---------|-------|-------------|------------|
-| 2 | Attention pooling (frozen) | 5.7M | 49.79% | ~50% | Baseline | -17.66% |
-| 10a | LoRA r=16 | 7.52M | 53.75% | 55.03% | +3.96% | -13.70% |
-| 10c | LoRA r=16 low LR | 7.52M | 52.56% | 54.80% | +2.77% | -14.89% |
-| **10b** | **LoRA r=32 + k_proj** | **9.39M** | **54.61%** 🏆 | **60.34%** 🏆 | **+4.82%** | **-12.84%** |
-| 11 | LoRA + Attention Supervision | ~10M | 🔜 Planned | 🔜 | TBD | TBD |
+| Exp | Approach | Val mAP | Entropy | Notes |
+|-----|----------|---------|---------|-------|
+| 2 | Baseline (frozen) | 49.79% | 98.4% | Baseline |
+| 10a | LoRA r=16 | 53.75% | 97.9% | +3.96%, entropy unchanged |
+| 10b | LoRA r=32 + k_proj | **54.61%** | 97.9% | Best mAP, entropy still unchanged |
+| 10c | LoRA r=16 low LR | 52.56% | ~98% | Lower LR didn't help |
+| 11 | Attention supervision (lambda=0.1) | 43.70% | 99.2% | Entropy barely changed |
+| 11 | Attention supervision (lambda=1.0) | Running | ? | Testing aggressive lambda |
 
 **Current Best: 54.61% mAP | Gap to SwinCVS (67.45%): 12.84%**
 
@@ -781,73 +781,72 @@ training:
 
 ---
 
-## Experiment 11: Attention Supervision - PLANNED
+## Exp11: Attention Supervision - IN PROGRESS
 
 ### Hypothesis
-Directly supervising attention with segmentation masks will force V-JEPA to attend to anatomical regions instead of uniformly.
+Directly supervising attention with segmentation masks will force V-JEPA to attend to anatomy instead of uniformly.
 
-### Motivation
-From Exp10b analysis:
-- V-JEPA attention entropy: 97.9% (nearly uniform)
-- LoRA (even with k_proj) did NOT change attention patterns
-- Performance gains came from value extraction, not attention focus
+### Setup
+| Setting | Value |
+|---------|-------|
+| Base | LoRA r=32 + k_proj (same as Exp10b) |
+| Attention supervision | KL divergence loss |
+| Target | Attention should focus on mask regions |
+| Lambda (attention weight) | 0.1 -> **1.0** (increased) |
+| Mask coverage | 51.2% of clips |
 
-**Key insight:** To change WHERE the model looks, need explicit supervision.
+### Results (lambda=0.1)
+| Epoch | Train mAP | Val mAP | Attention Loss | Entropy |
+|-------|-----------|---------|----------------|---------|
+| 1 | 38.87% | 37.88% | 3.60 | 99.5% |
+| 2 | 62.09% | 43.70% | 3.59 | 99.2% |
+| 3 | 72.23% | ~45% | 3.58 | 99.3% |
 
-### Approach
-Add attention supervision loss using segmentation masks:
+**Key Finding: Entropy barely changed (99.5% -> 99.2%)** - attention supervision with lambda=0.1 is too weak.
 
-```python
-def attention_supervision_loss(attention_weights, mask):
-    """
-    Loss to make attention focus on anatomy regions.
-
-    1. Create target distribution from mask (non-background = high attention)
-    2. Compute KL divergence between V-JEPA attention and target
-    3. Penalize uniform attention, reward anatomy focus
-    """
-    # Resize mask to patch grid (16x16)
-    mask_patches = F.interpolate(mask, size=(16, 16), mode='nearest')
-
-    # Create target: high attention on anatomy, low on background
-    target = (mask_patches > 0).float()
-    target = target / (target.sum() + 1e-8)  # Normalize to distribution
-
-    # Get V-JEPA attention (average over heads)
-    attention = attention_weights.mean(dim=1)  # [B, tokens, tokens]
-    spatial_attention = attention.mean(dim=1)  # [B, tokens]
-
-    # KL divergence loss
-    return F.kl_div(spatial_attention.log(), target, reduction='batchmean')
-```
-
-### Configuration
-```yaml
-attention_supervision:
-  enabled: true
-  lambda: 0.1           # Start small, avoid destabilizing
-  warmup_epochs: 1      # Let model stabilize first
-  loss_type: "kl"       # KL divergence
-  min_mask_coverage: 0.01  # Skip if mask <1% of image
-
-loss:
-  cvs_weight: 1.0
-  seg_weight: 0.3
-  attention_weight: 0.1  # New: attention supervision
-```
-
-### Expected Outcome
-- Reduce attention entropy from ~98% to <90%
-- Attention heatmaps should show focus on anatomical structures
-- May improve C2 detection (attention on cystic plate)
-- Risk: May destabilize training if lambda too high
+Now testing with lambda=1.0 (10x stronger)...
 
 ### Files
 - `configs/exp11_attention_supervised.yaml`
 - `train_attention_supervised.py`
 
-### Status
-READY TO RUN
+---
+
+## Key Finding: Why V-JEPA's Attention Is Rigid
+
+### Why V-JEPA's Attention Is Hard to Change
+
+**1. Scale Mismatch**
+- V-JEPA pretraining: Millions of videos, billions of tokens
+- Our fine-tuning: 37K clips, ~10 epochs
+- Ratio: ~1000:1 in favor of pretrained patterns
+
+**2. Self-Supervised Objective**
+V-JEPA was trained to predict masked video patches. This requires attending to EVERYTHING to gather context:
+- Pretraining task: "Predict what's behind the mask"
+- Solution learned: "Look everywhere for clues"
+- Result: Uniform attention (98% entropy) is OPTIMAL for the original task
+
+**3. LoRA Only Adds Small Perturbations**
+- Original weight: W (huge, frozen)
+- LoRA adaptation: W + A*B (tiny, ~1-3% of computation)
+- Original patterns: ~97-99% preserved
+
+**4. Attention is Computed, Not Directly Learned**
+- Q = W_q * input  <-- LoRA modifies this
+- K = W_k * input  <-- LoRA modifies this
+- Attention = softmax(Q * K^T / sqrt(d))  <-- Formula is FIXED
+- The softmax naturally spreads attention. LoRA changes Q and K, but can't fundamentally change how attention is computed.
+
+### What Would Actually Change Attention?
+
+| Approach | Changes Attention? | Why |
+|----------|-------------------|-----|
+| LoRA on Q,K,V | No, barely | Small perturbations |
+| Attention supervision (lambda=0.1) | No, barely | Can't override pretrained patterns |
+| Attention supervision (lambda=1.0) | Testing | Stronger signal |
+| Window attention (Swin-style) | Yes | Architectural constraint |
+| Full pretraining on surgery | Yes | Learn new patterns from scratch |
 
 ---
 
@@ -1028,4 +1027,4 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 ---
 
-*Last updated: 2026-02-02 (Added Exp11: Attention Supervision using masks to force V-JEPA to attend to anatomy)*
+*Last updated: 2026-02-03 (Added Exp11 results: attention supervision too weak at lambda=0.1, V-JEPA attention rigidity analysis)*
