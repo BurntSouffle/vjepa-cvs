@@ -1,0 +1,29 @@
+
+============================================================
+SAGES SYNTHETIC MASK VERIFICATION REPORT
+============================================================
+
+Total masks generated: 63000
+Sample analyzed: 200
+
+Classes found: [np.uint8(0), np.uint8(1), np.uint8(5), np.uint8(6)]
+Class coverage:
+  Class 0 (background): 100.0% of masks
+  Class 1 (cystic_plate): 100.0% of masks
+  Class 5 (gallbladder): 100.0% of masks
+  Class 6 (tool): 99.5% of masks
+
+--- Key Metrics ---
+Masks with anatomy (class 1): 100.0%
+Masks with gallbladder (class 5): 100.0%
+Masks with tool (class 6): 99.5%
+
+--- Issues ---
+Missing classes (expected - SAM2 doesn't generate): {2, 3, 4}
+  These are fine anatomy classes (calot, artery, duct)
+  SAM2 coarse model maps uncertain regions to class 1 (anatomy)
+
+--- Compatibility ---
+Class IDs match Endoscapes format: YES
+Can be used with dataset_improved.py: YES
+Centre crop compatible: YES (tested)
