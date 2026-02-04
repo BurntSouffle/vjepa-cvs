@@ -211,10 +211,18 @@ class VJEPA_LoRA_LayerSelective(nn.Module):
     """
     V-JEPA with LoRA adapters on *selected* layers only.
 
-    Key difference from VJEPA_LoRA in train_regularized.py:
-    - target_layers parameter restricts LoRA to specific transformer blocks
-    - e.g. target_layers=[18,19,20,21,22,23] only adapts the last 6 of 24 layers
+    Uses PEFT's native layers_to_transform parameter for clean layer selection.
+
+    V-JEPA ViT-L module naming:
+        encoder.layer.{0-23}.attention.query   (nn.Linear, 1024x1024)
+        encoder.layer.{0-23}.attention.key     (nn.Linear, 1024x1024)
+        encoder.layer.{0-23}.attention.value   (nn.Linear, 1024x1024)
+
+    NOTE: V-JEPA uses "query"/"key"/"value", NOT "q_proj"/"k_proj"/"v_proj".
     """
+
+    # V-JEPA attention projection names (not q_proj/k_proj/v_proj!)
+    VJEPA_ATTN_MODULES = ["query", "key", "value"]
 
     def __init__(
         self,
@@ -251,28 +259,48 @@ class VJEPA_LoRA_LayerSelective(nn.Module):
         for param in backbone.parameters():
             param.requires_grad = False
 
+        # Map config names to V-JEPA's actual module names
+        # Config may use q_proj/k_proj/v_proj (common convention) but
+        # V-JEPA uses query/key/value
+        ALIAS_MAP = {
+            "q_proj": "query", "k_proj": "key", "v_proj": "value",
+            "query": "query", "key": "key", "value": "value",
+        }
         if target_modules is None:
-            target_modules = ["q_proj", "v_proj"]
+            target_modules = ["query", "value"]
+        resolved_modules = [ALIAS_MAP.get(m, m) for m in target_modules]
 
-        # Find modules matching target patterns AND target layers
-        actual_targets = self._find_layer_selective_modules(
-            backbone, target_modules, target_layers
-        )
-        print(f"Layer-selective LoRA: {len(actual_targets)} modules across layers {target_layers}")
-        for name in sorted(actual_targets)[:6]:
-            print(f"  {name}")
-        if len(actual_targets) > 6:
-            print(f"  ... and {len(actual_targets) - 6} more")
+        # Verify modules exist in the model
+        found = set()
+        for name, module in backbone.named_modules():
+            if isinstance(module, nn.Linear):
+                for tm in resolved_modules:
+                    if name.endswith(f".{tm}"):
+                        found.add(tm)
+        print(f"Resolved target modules: {resolved_modules}")
+        print(f"  Verified in model: {sorted(found)}")
 
-        # Apply LoRA
-        lora_config = LoraConfig(
+        # Build LoRA config with PEFT's native layer selection
+        lora_kwargs = dict(
             r=lora_r,
             lora_alpha=lora_alpha,
-            target_modules=actual_targets if actual_targets else target_modules,
+            target_modules=resolved_modules,
             lora_dropout=lora_dropout,
             bias="none",
             modules_to_save=[],
         )
+
+        if target_layers is not None:
+            # PEFT's layers_to_transform selects layers by index.
+            # layers_pattern tells PEFT how to parse layer numbers from names.
+            # V-JEPA: "encoder.layer.{N}.attention.query" -> pattern is "layer"
+            lora_kwargs["layers_to_transform"] = target_layers
+            lora_kwargs["layers_pattern"] = "layer"
+            print(f"Layer-selective LoRA: layers {target_layers} (6 of 24)")
+        else:
+            print("LoRA applied to ALL 24 layers")
+
+        lora_config = LoraConfig(**lora_kwargs)
         print(f"Applying LoRA with r={lora_r}, alpha={lora_alpha}")
         self.backbone = get_peft_model(backbone, lora_config)
         self.backbone.print_trainable_parameters()
@@ -293,53 +321,6 @@ class VJEPA_LoRA_LayerSelective(nn.Module):
         )
 
         self._init_heads()
-
-    def _find_layer_selective_modules(self, model, target_patterns, target_layers):
-        """
-        Find modules matching target_patterns that belong to target_layers.
-
-        V-JEPA ViT-L naming: encoder.layer.{i}.attention.{query|key|value}
-        We match against both the pattern name and the layer index.
-        """
-        matched = []
-
-        for name, module in model.named_modules():
-            if not isinstance(module, nn.Linear):
-                continue
-
-            # Check if name contains any target pattern
-            pattern_match = any(p in name for p in target_patterns)
-            if not pattern_match:
-                continue
-
-            # If no layer restriction, include all
-            if target_layers is None:
-                matched.append(name)
-                continue
-
-            # Extract layer number from name
-            # Pattern: encoder.layer.{N}. or layers.{N}. etc.
-            layer_num = self._extract_layer_number(name)
-            if layer_num is not None and layer_num in target_layers:
-                matched.append(name)
-
-        return list(set(matched))
-
-    @staticmethod
-    def _extract_layer_number(name):
-        """Extract transformer layer index from a module name."""
-        # Try common patterns
-        for pattern in [
-            r'encoder\.layer\.(\d+)\.',
-            r'encoder\.layers\.(\d+)\.',
-            r'blocks\.(\d+)\.',
-            r'layer\.(\d+)\.',
-            r'layers\.(\d+)\.',
-        ]:
-            m = re.search(pattern, name)
-            if m:
-                return int(m.group(1))
-        return None
 
     def _init_heads(self):
         for module in self.cvs_head.modules():

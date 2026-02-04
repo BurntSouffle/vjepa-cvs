@@ -28,9 +28,11 @@ lora:
   r: 32
   lora_alpha: 64
   target_modules:
-    - "q_proj"
-    - "k_proj"
-    - "v_proj"
+    # V-JEPA uses "query"/"key"/"value", NOT "q_proj"/"k_proj"/"v_proj"
+    # The training script also accepts q_proj/k_proj/v_proj and maps them.
+    - "query"
+    - "key"
+    - "value"
   target_layers: [18, 19, 20, 21, 22, 23]  # Only last 6 of 24 layers
   lora_dropout: 0.1
   bias: "none"
