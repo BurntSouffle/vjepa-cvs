@@ -1,0 +1,67 @@
+# Improved Data Loading Configuration
+# ====================================
+# Fixes temporal overlap and label noise issues found in the labelling analysis.
+#
+# Key changes vs original dataset_multitask.py:
+#   1. Centre crop 480x480 removes endoscopic black borders
+#   2. Label consistency checking across all frames in clip
+#   3. Configurable frame_step (stride through available_frames)
+#   4. Clip subsampling reduces redundancy (adjacent clips share 15/16 frames)
+#
+# The original dataset had:
+#   - frame_step=25 (unused, consecutive available frames always picked)
+#   - No label checking (centre frame only)
+#   - No subsampling (all metadata rows become clips)
+#   - No centre crop (direct resize with black borders)
+
+# --- Dataset parameters ---
+dataset:
+  num_frames: 16
+  frame_step: 5           # Stride through available_frames list.
+                          # 1 = consecutive (densest), 5 = every 5th available frame.
+                          # In Endoscapes (available frames 25 apart):
+                          #   step=1 -> clip spans (16-1)*1*25 = 375 raw frames (12.5s)
+                          #   step=5 -> clip spans (16-1)*5*25 = 1875 raw frames (62.5s)
+                          # For SAGES or denser extractions, adjust accordingly.
+  resolution: 256
+  centre_crop: 480        # Centre crop before resize. Removes black endoscopic borders.
+                          # Set to null to disable (direct resize like original).
+  mask_resolution: 64
+
+  # Label consistency
+  label_strategy: 'soft'  # Options:
+                          #   'center'   - centre frame only (original behaviour)
+                          #   'strict'   - skip clips where any frame label differs
+                          #   'soft'     - mean of raw labels across all clip frames
+                          #   'majority' - binarize each frame, majority vote per criterion
+  binarize_threshold: 0.5
+
+  # Overlap reduction
+  clip_subsample: 4       # Keep every Nth clip per video (1=all, 4=every 4th).
+                          # Original: ~292 frames/video -> ~292 clips/video.
+                          # With subsample=4: ~73 clips/video, much less overlap.
+
+# --- Recommended configurations ---
+#
+# Conservative (closest to original, just add crop + soft labels):
+#   num_frames: 16, frame_step: 1, label_strategy: 'soft', clip_subsample: 1
+#   -> Same clip count, smoother labels, better crops
+#
+# Balanced (recommended for training):
+#   num_frames: 16, frame_step: 1, label_strategy: 'soft', clip_subsample: 4
+#   -> 4x fewer clips, much less redundancy, soft labels
+#
+# Strict filtering (cleanest labels, fewer clips):
+#   num_frames: 16, frame_step: 1, label_strategy: 'strict', clip_subsample: 1
+#   -> Only clips with 100% label agreement, hard labels
+#
+# Short clips (SwinCVS-style):
+#   num_frames: 5, frame_step: 1, label_strategy: 'majority', clip_subsample: 1
+#   -> Tighter temporal window, less label mixing
+
+# --- Data paths (RunPod) ---
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results"

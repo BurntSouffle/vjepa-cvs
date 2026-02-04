@@ -1,0 +1,129 @@
+# Experiment 14: Clean Labels + All Supervisor Fixes
+# ====================================================
+# Combines the best findings so far:
+#   - 5-frame clips (96.4% label agreement vs 71.2% with 16 frames)
+#   - Majority vote labels across clip frames
+#   - Centre crop 480x480 (removes endoscopic black borders)
+#   - LoRA only on later layers (18-23) to preserve V-JEPA's learned features
+#   - All Exp12 regularization (MixUp, CutMix, label smoothing, HAM)
+#
+# Changes from Exp12:
+#   - num_frames: 16 -> 5 (tighter temporal window, cleaner labels)
+#   - centre_crop: 480 (new, removes borders)
+#   - label_strategy: 'majority' (new, consensus across clip frames)
+#   - LoRA target_layers: [18-23] only (was all 24 layers)
+#   - batch_size: 64 -> 32 (5 frames uses less memory, can keep 32)
+
+experiment:
+  name: "exp14_clean_labels"
+  description: "V-JEPA with clean labels, centre crop, and LoRA on later layers only"
+  hypothesis: >
+    Fixing label noise (5 frames + majority vote), centre cropping to remove
+    black borders, and focusing LoRA on later layers (preserving V-JEPA's
+    learned low-level features) will significantly improve performance.
+  baseline: "exp12_regularized (55.98% mAP with noisy 16-frame labels)"
+
+# LoRA configuration - later layers only
+lora:
+  r: 32
+  lora_alpha: 64
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+  target_layers: [18, 19, 20, 21, 22, 23]  # Only last 6 of 24 layers
+  lora_dropout: 0.1
+  bias: "none"
+
+# Model configuration
+model:
+  name: "facebook/vjepa2-vitl-fpc16-256-ssv2"
+  hidden_dim: 1024
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+  num_seg_classes: 5
+  seg_output_size: 64
+  seg_dropout: 0.1
+
+# Training configuration
+training:
+  epochs: 15
+  batch_size: 32
+  gradient_accumulation: 2
+  head_lr: 5.0e-4
+  lora_lr: 1.0e-4
+  weight_decay: 0.1
+  label_smoothing: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 0.5
+  min_lr: 1.0e-7
+  early_stopping_patience: 5
+  num_workers: 8
+  mixed_precision: true
+  grad_clip: 1.0
+
+# Data paths
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results/exp14_clean_labels"
+
+# Dataset configuration - IMPROVED
+dataset:
+  num_frames: 5              # Reduced from 16 - matches SwinCVS, 96.4% agreement
+  frame_step: 1              # Dense sampling (consecutive available frames)
+  resolution: 256
+  centre_crop: 480           # Remove black endoscopic borders
+  mask_resolution: 64
+  use_synthetic_masks: true
+  label_strategy: 'majority' # Majority vote across clip frames
+  clip_subsample: 1          # Keep all clips (5 frames already reduces noise)
+  binarize_threshold: 0.5
+
+# Data augmentation - same as Exp12
+augmentation:
+  horizontal_flip_prob: 0.5
+  rotation_degrees: 15
+  color_jitter:
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.2
+    hue: 0.1
+  random_erasing_prob: 0.2
+  gaussian_blur_prob: 0.1
+  gaussian_blur_sigma: [0.1, 2.0]
+  mixup_alpha: 0.8
+  cutmix_alpha: 1.0
+  mixup_prob: 0.5
+  cutmix_prob: 0.5
+
+# Hard attention masking
+hard_attention_masking:
+  enabled: true
+  spatial_size: 16
+  mask_value: 0.0
+  apply_during_training: true
+  apply_during_eval: false
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3
+  cvs_pos_weight: [1.0, 3.0, 1.0]
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "balanced_accuracy"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_checkpoints: true
+
+# Reproducibility
+seed: 42
