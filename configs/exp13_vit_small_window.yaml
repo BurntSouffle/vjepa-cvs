@@ -1,0 +1,122 @@
+# Experiment 13: Small ViT with Window Attention (Train from Scratch)
+# ====================================================================
+# ~24M param ViT with SwinV2-style window attention trained from scratch
+# on surgical video data. Tests whether window attention inductive bias
+# can match or beat fine-tuned V-JEPA (307M params) on CVS classification.
+#
+# Key differences from exp12:
+#   - No pretrained backbone, no LoRA - trained entirely from scratch
+#   - SwinV2-style window attention (64x64 attention vs 2048x2048 global)
+#   - 50 epochs (vs 15), 5 epoch warmup
+#   - Single learning rate for all params
+#   - Lower MixUp/CutMix probabilities (0.3 vs 0.5)
+
+experiment:
+  name: "exp13_vit_small_window"
+  description: "Small ViT (~24M) with SwinV2-style window attention, trained from scratch"
+  hypothesis: >
+    Window attention provides a strong spatial inductive bias that helps
+    the model focus on local surgical anatomy. A small model with the right
+    inductive bias (window attention) might learn more efficiently than
+    fine-tuning a large pretrained model with global attention (V-JEPA).
+  baseline: "exp12_regularized (LoRA fine-tuned V-JEPA, 55.98% mAP)"
+
+# Model configuration
+model:
+  type: "vit_small_window"
+  embed_dim: 384
+  depth: 12
+  num_heads: 6
+  window_size: 8
+  mlp_ratio: 4.0
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+  num_frames: 16
+  spatial_size: 16
+  temporal_kernel: 2
+  spatial_kernel: 16
+  # Head params
+  cvs_hidden: 512
+  cvs_dropout: 0.5
+  attention_heads: 8
+  attention_dropout: 0.1
+  num_seg_classes: 5
+  seg_output_size: 64
+  seg_dropout: 0.1
+
+# Training configuration
+training:
+  epochs: 50
+  batch_size: 64
+  gradient_accumulation: 2
+  learning_rate: 1.0e-3
+  weight_decay: 0.05
+  label_smoothing: 0.1
+  scheduler: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-7
+  early_stopping_patience: 10
+  num_workers: 8
+  mixed_precision: true
+  grad_clip: 1.0
+
+# Data paths
+data:
+  endoscapes_root: "/workspace/vjepa/data/endoscapes"
+  gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
+  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  results_dir: "/workspace/results/exp13_vit_small_window"
+
+# Dataset configuration
+dataset:
+  num_frames: 16
+  frame_step: 25
+  resolution: 256
+  mask_resolution: 64
+  use_synthetic_masks: true
+
+# Data augmentation - reduced MixUp/CutMix probs for from-scratch training
+augmentation:
+  horizontal_flip_prob: 0.5
+  rotation_degrees: 15
+  color_jitter:
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.2
+    hue: 0.1
+  random_erasing_prob: 0.2
+  gaussian_blur_prob: 0.1
+  gaussian_blur_sigma: [0.1, 2.0]
+  mixup_alpha: 0.8
+  cutmix_alpha: 1.0
+  mixup_prob: 0.3
+  cutmix_prob: 0.3
+
+# Hard attention masking configuration
+hard_attention_masking:
+  enabled: true
+  spatial_size: 16
+  mask_value: 0.0
+  apply_during_training: true
+  apply_during_eval: false
+
+# Loss configuration
+loss:
+  cvs_weight: 1.0
+  seg_weight: 0.3
+  cvs_pos_weight: [1.0, 3.0, 1.0]
+  seg_class_weights: [0.1, 5.0, 3.0, 2.0, 2.0]
+
+# Evaluation
+evaluation:
+  metrics: ["mAP", "AP_per_class", "seg_miou", "balanced_accuracy"]
+  threshold: 0.5
+
+# Logging
+logging:
+  log_every_n_steps: 20
+  save_checkpoints: true
+
+# Reproducibility
+seed: 42
