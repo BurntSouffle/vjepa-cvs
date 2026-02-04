@@ -23,13 +23,13 @@ data:
 
   # Endoscapes dataset
   endoscapes:
-    frames_dir: /workspace/data/endoscapes
-    masks_dir: /workspace/data/endoscapes/synthetic_masks_sam2
+    frames_dir: /workspace/vjepa/data/endoscapes
+    masks_dir: /workspace/vjepa/data/Masks/synthetic_masks_sam2
 
   # SAGES dataset
   sages:
-    frames_dir: /workspace/data/sages/frames
-    masks_dir: /workspace/data/sages/synthetic_masks/semantic
+    frames_dir: /workspace/vjepa/data/sages/frames
+    masks_dir: /workspace/vjepa/data/Masks/synthetic_masks/semantic
 
   # Clip configuration
   batch_size: 4
@@ -90,7 +90,7 @@ mask:
 
 # Logging
 logging:
-  folder: /workspace/results/vjepa_surgical_pretrain
+  folder: /workspace/vjepa/results/vjepa_surgical_pretrain
   write_tag: surgical_pretrain
   log_attention_entropy_every: 500  # Track attention entropy changes
 
