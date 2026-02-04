@@ -1,0 +1,153 @@
+# Anatomy-Guided V-JEPA Pretraining on Surgical Data
+# ===================================================
+# Continued pretraining of V-JEPA ViT-L on surgical videos with
+# anatomy-guided masking to learn surgery-specific representations.
+#
+# Key differences from standard V-JEPA pretraining:
+#   1. Anatomy-guided masking: masks biased toward anatomical structures
+#   2. Surgical video data: Endoscapes + SAGES datasets
+#   3. Continued pretraining: start from pretrained V-JEPA checkpoint
+#   4. Lower learning rate: 1/10th of original to preserve features
+#
+# Run: python app/main.py --fname configs/pretrain/surgical_vitl16.yaml
+
+app: vjepa_surgical
+
+# Single-node training
+nodes: 1
+tasks_per_node: 1
+
+# Data configuration
+data:
+  dataset_type: SurgicalVideoDataset
+
+  # Endoscapes dataset
+  endoscapes:
+    frames_dir: /workspace/data/endoscapes
+    masks_dir: /workspace/data/endoscapes/synthetic_masks_sam2
+
+  # SAGES dataset
+  sages:
+    frames_dir: /workspace/data/sages/frames
+    masks_dir: /workspace/data/sages/synthetic_masks/semantic
+
+  # Clip configuration
+  batch_size: 4
+  num_frames: 16
+  tubelet_size: 2
+  crop_size: 256           # Final resolution (matches V-JEPA2 256x256)
+  centre_crop: 480         # Remove black endoscopic borders
+  patch_size: 16
+
+  # DataLoader
+  pin_mem: true
+  num_workers: 8
+
+# Data augmentation
+data_aug:
+  auto_augment: false
+  motion_shift: false
+  random_resize_aspect_ratio:
+    - 0.9
+    - 1.1
+  random_resize_scale:
+    - 0.8
+    - 1.0
+  reprob: 0.0
+
+# Masking configuration - anatomy-guided
+mask:
+  type: anatomy_guided      # Use anatomy-guided mask collator
+  anatomy_bias: 0.7         # 70% anatomy-guided, 30% random
+
+  # Short masks (many small blocks for fine-grained prediction)
+  - aspect_ratio:
+      - 0.75
+      - 1.5
+    num_blocks: 8           # Same as original V-JEPA
+    spatial_scale:
+      - 0.15
+      - 0.15
+    temporal_scale:
+      - 1.0
+      - 1.0
+    max_temporal_keep: 1.0
+    max_keep: null
+
+  # Long masks (few large blocks for global understanding)
+  - aspect_ratio:
+      - 0.75
+      - 1.5
+    num_blocks: 2
+    spatial_scale:
+      - 0.7
+      - 0.7
+    temporal_scale:
+      - 1.0
+      - 1.0
+    max_temporal_keep: 1.0
+    max_keep: null
+
+# Logging
+logging:
+  folder: /workspace/results/vjepa_surgical_pretrain
+  write_tag: surgical_pretrain
+  log_attention_entropy_every: 500  # Track attention entropy changes
+
+# Loss configuration
+loss:
+  loss_exp: 1.0
+  reg_coeff: 0.0
+
+# Model configuration
+model:
+  # Start from pretrained V-JEPA ViT-L
+  model_name: vit_large
+  pretrained_checkpoint: null  # Will be set to HF or local path
+  load_pretrained: true
+
+  # Predictor (same as original)
+  pred_depth: 12
+  pred_embed_dim: 384
+  uniform_power: true
+  use_mask_tokens: true
+  zero_init_mask_tokens: true
+
+# Meta configuration
+meta:
+  load_checkpoint: false    # For resuming interrupted training
+  read_checkpoint: null
+  seed: 42
+  eval_freq: 100
+  use_sdpa: true
+  dtype: bfloat16
+
+# Optimization - conservative for continued pretraining
+optimization:
+  # Learning rate: 1/10th of original to preserve features
+  start_lr: 0.00002         # 0.0002 / 10
+  lr: 0.0000625             # 0.000625 / 10
+  final_lr: 1.0e-07
+
+  # Epochs and iterations
+  epochs: 20                # Shorter than from-scratch (300)
+  ipe: 100                  # Iterations per epoch (adjusted for dataset size)
+  ipe_scale: 1.0
+
+  # Warmup
+  warmup: 2                 # 2 epochs warmup
+
+  # Regularization
+  weight_decay: 0.04
+  final_weight_decay: 0.4
+  clip_grad: 10.0
+
+  # EMA for target encoder
+  ema:
+    - 0.998
+    - 1.0
+
+# Gradient accumulation for effective larger batch
+# Effective batch = batch_size * gradient_accumulation * num_gpus
+# 4 * 16 * 1 = 64 effective batch size
+gradient_accumulation: 16
