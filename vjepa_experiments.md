@@ -427,7 +427,7 @@ Early stopped at epoch 4. Best Stage 2: **48.49% mAP** (Epoch 1)
 
 ---
 
-## Experiment 10: LoRA Fine-Tuning - COMPLETED ✅ **BEST RESULT**
+## Experiment 10: LoRA Fine-Tuning - COMPLETED ✅
 
 ### Hypothesis
 LoRA (Low-Rank Adaptation) adapts pretrained features without destroying them by:
@@ -527,7 +527,7 @@ Task Heads:                HOW to classify → Trained on surgical domain
 
 ---
 
-### Exp10b: Higher Rank LoRA (r=32 + k_proj) - COMPLETED 🏆 **BEST RESULT**
+### Exp10b: Higher Rank LoRA (r=32 + k_proj) - COMPLETED
 
 **Hypothesis:** More LoRA capacity + targeting k_proj might change attention patterns
 
@@ -671,12 +671,25 @@ Entropy: 97.8→99.6→99.0→98.5→94.8→98.3
 
 ## Key Insights
 
-1. **LoRA improves V-JEPA performance** - 54.61% mAP (+4.82% over baseline)
-2. **LoRA does NOT change attention patterns** - entropy stays ~98% regardless of rank
-3. **V-JEPA's uniform attention is deeply ingrained** - from self-supervised pretraining on millions of videos
-4. **Attention supervision (lambda=0.1) too weak** - entropy only dropped 0.3%
-5. **Performance gains come from better value extraction**, not focused attention
-6. **To change WHERE V-JEPA looks, need architectural changes** (window attention) not just training tricks
+1. **Best result: 55.98% mAP** (Exp12 with strong regularization)
+2. **Regularization delays overfitting** - Peak moved from epoch 1 to epoch 4
+3. **LoRA improves V-JEPA** - But only by ~6% over baseline
+4. **V-JEPA attention cannot be changed** - Stays ~98% uniform despite all interventions
+5. **Attention supervision failed** - Even λ=1.0 didn't reduce entropy
+6. **Hard masking + MixUp/CutMix helps** - More stable training, higher peak
+7. **Fundamental limitation: Global attention** - V-JEPA architecture unsuited for surgical anatomy
+
+## Progress Summary
+```
+Baseline:     49.79%
+
+LoRA:       54.61% (+4.82%)
+Regularization: 55.98% (+1.37%)
+─────────────────────────
+Total gain:   +6.19%
+
+Gap to SwinCVS: 11.47% remaining
+```
 
 ---
 
@@ -783,19 +796,17 @@ Training set imbalance:
 
 ## Summary Table
 
-| Exp | Approach | Val mAP | Entropy | Peak Epoch | Status |
-|-----|----------|---------|---------|------------|--------|
-| 2 | Baseline (frozen) | 49.79% | 98.4% | 2 | ✅ |
-| 10a | LoRA r=16 | 53.75% | 97.9% | 2 | ✅ |
-| 10b | LoRA r=32 + k_proj | **54.61%** | 97.9% | 1 | ✅ Best mAP |
-| 10c | LoRA low LR | 52.56% | ~98% | 3 | ✅ |
-| 11 | Attention supervision | 49.77% | 99.2% | - | ❌ Failed |
-| 12 | Hard masking + regularization | ? | ? | ? | 🔄 Running |
+| Exp | Approach | Val mAP | Peak Epoch | Status |
+|-----|----------|---------|------------|--------|
+| 2 | Baseline (frozen) | 49.79% | 2 | ✅ |
+| 10a | LoRA r=16 | 53.75% | 2 | ✅ |
+| 10b | LoRA r=32 + k_proj | 54.61% | 1 | ✅ |
+| 10c | LoRA low LR | 52.56% | 3 | ✅ |
+| 11 | Attention supervision | 49.77% | - | ❌ Failed |
+| **12** | **Regularization + Hard masking** | **55.98%** 🏆 | **4** | ✅ **Best** |
 
-**Current Best: 54.61% mAP | Gap to SwinCVS (67.45%): 12.84%**
-
-### Key Takeaway
-**LoRA r=32 + k_proj is the winner.** Achieved 54.61% mAP at epoch 1 with dramatic C2 improvement (60.34% AP, +10% over baseline). Higher rank enables faster learning but also faster overfitting - train for 1-2 epochs max.
+**Current Best: 55.98% mAP (Exp12)**
+**Gap to SwinCVS: 11.47%**
 
 ## LoRA Experiments Summary
 
@@ -843,10 +854,10 @@ Even with aggressive attention supervision (λ=1.0), entropy remained at 99.2-99
 
 ---
 
-## Exp12: Strong Regularization + Hard Attention Masking - RUNNING 🔄
+## Exp12: Strong Regularization + Hard Attention Masking - COMPLETED ✅
 
 ### Hypothesis
-Based on external feedback: Instead of trying to TRAIN attention to focus, FORCE it architecturally.
+Based on external feedback: Use strong regularization (MixUp, CutMix, Label Smoothing) to delay overfitting, and hard attention masking to force focus on anatomy.
 
 ### Key Changes from Exp10b
 
@@ -855,35 +866,83 @@ Based on external feedback: Instead of trying to TRAIN attention to focus, FORCE
 | MixUp | ❌ | ✅ α=0.8 |
 | CutMix | ❌ | ✅ α=1.0 |
 | Label Smoothing | ❌ | ✅ 0.1 |
-| Weight Decay | 0.05 | **0.1** |
-| Warmup | 2 epochs | **0.5 epochs** |
-| Attention | Uniform (98%) | **Hard masked** |
+| Weight Decay | 0.05 | 0.1 |
+| Warmup | 2 epochs | 0.5 epochs |
+| Attention | Uniform | Hard masked on anatomy |
 
-### Hard Attention Masking
-```python
-# Instead of soft supervision:
-loss = cvs_loss + λ * attention_loss  # ❌ Failed
+### Results
 
-# We now FORCE focus:
-attention = attention * anatomy_mask  # ✅ Architectural
-attention = attention / attention.sum()  # Re-normalize
-```
+| Epoch | Train mAP | Val mAP | C1 | C2 | C3 | Notes |
+|-------|-----------|---------|-----|-----|-----|-------|
+| 1 | 20.30% | 45.59% | 51.35% | 46.44% | 38.98% | Building |
+| 2 | 34.37% | 55.77% | 58.27% | 56.77% | 52.25% | Great |
+| 3 | 39.32% | 53.59% | 50.13% | 55.76% | 54.89% | Dip |
+| 4 | 41.07% | **55.98%** 🏆 | 54.69% | 57.85% | 55.39% | **NEW BEST** |
+| 5 | 44.52% | 47.90% | 51.17% | 46.92% | 45.62% | Drop |
+| 6 | 47.50% | 49.74% | 49.94% | 50.98% | 48.29% | Overfit |
 
-The model physically CANNOT attend to background tokens.
+**Best: 55.98% mAP (Epoch 4)** - NEW RECORD!
 
-### Expected Outcome
+### What Worked
 
-| Metric | Exp10b | Exp12 Target |
-|--------|--------|--------------|
-| Peak Epoch | 1 | **3-5** (delayed) |
-| Val mAP | 54.61% | Higher |
-| Overfitting | Severe | **Reduced** |
+| Improvement | Evidence |
+|-------------|----------|
+| **Delayed overfitting** | Peak at epoch 4 (vs epoch 1 for Exp10b) |
+| **Higher peak mAP** | 55.98% vs 54.61% (+1.37%) |
+| **More stable training** | Val > Train for 6 epochs (generalizing) |
+| **Better C3 detection** | 55.39% vs 51.32% (+4.07%) |
 
-Training in progress...
+### What Didn't Work
+
+| Issue | Evidence |
+|-------|----------|
+| **Still far from SwinCVS** | 55.98% vs 67.45% (11.5% gap) |
+| **Attention still uniform** | Hard masking applied but ~98% entropy persists |
+| **Eventually overfits** | Epochs 5-6 show declining val mAP |
+
+### Key Insight
+
+Regularization delays overfitting and achieves slightly higher peak, but cannot overcome V-JEPA's fundamental architectural limitations (global uniform attention).
 
 ### Files
 - `configs/exp12_regularized.yaml`
 - `train_regularized.py`
+
+---
+
+## What's Next: Potential Experiments
+
+### Exp13: Small ViT with Window Attention (Train from Scratch)
+
+Instead of adapting V-JEPA, train a smaller model designed for surgery:
+
+| Setting | V-JEPA (current) | Proposed Exp13 |
+|---------|------------------|----------------|
+| Params | 307M | ~25M |
+| Layers | 24 | 12 |
+| Attention | Global (uniform) | **Window (local)** |
+| Pretrained | Natural video | **None (surgery only)** |
+
+**Hypothesis:** A smaller model with window attention, trained from scratch on surgical data, may learn surgery-specific attention patterns that V-JEPA cannot.
+
+### Exp14: Hybrid SwinCVS + V-JEPA
+
+Combine SwinCVS spatial features with V-JEPA temporal modeling:
+```
+Frame → SwinCVS (local attention) → Spatial features
+↓
+V-JEPA temporal layers
+↓
+CVS Classification
+```
+
+### Exp15: V-JEPA with Architectural Window Attention
+
+Modify V-JEPA architecture to use window attention instead of global:
+```python
+# Replace: Global attention (2048 × 2048)
+# With: Window attention (8 × 8 windows)
+```
 
 ---
 
@@ -1044,7 +1103,7 @@ This could reveal where to intervene.
 
 ### Goal: Beat SwinCVS (67.45% mAP)
 
-Current gap: 54.61% → 67.45% = **12.84% to close**
+Current gap: 55.98% → 67.45% = **11.47% to close**
 
 ### Ideas to Explore
 
@@ -1149,16 +1208,16 @@ SwinCVS uses 5 frames at 1fps, V-JEPA uses 16 frames.
 
 ## Conclusions
 
-1. **Current Best: Exp10b (LoRA r=32 + k_proj)** with **54.61%** Val mAP (+4.82% over baseline)
-2. **Higher LoRA rank = higher peak, earlier overfitting** - r=32 peaks at epoch 1, r=16 at epoch 2
-3. **k_proj dramatically improves C2 detection** - 60.34% AP (+10% over baseline ~50%)
+1. **Current Best: Exp12 (Regularization + Hard Masking)** with **55.98%** Val mAP (+6.19% over baseline)
+2. **Regularization delays overfitting** - Peak moved from epoch 1 (Exp10b) to epoch 4 (Exp12)
+3. **LoRA + regularization is the best combination** - LoRA adapts features, regularization prevents overfitting
 4. **LoRA works better than direct fine-tuning** - adapts without destroying pretrained features
 5. **Direct backbone fine-tuning hurts performance** - Exp8 (2 layers), Exp9-S2 (1 layer) both degraded
 6. **Simple BCE with random sampling is best** for this moderate imbalance (~5-8x)
-7. **Overfitting is fundamental** - happens at epoch 1-3 regardless of LR, rank, or approach
-8. **V-JEPA's internal attention is UNIFORM** - ~98% entropy even after LoRA
+7. **Overfitting is fundamental** - happens eventually regardless of approach
+8. **V-JEPA's internal attention is UNIFORM** - ~98% entropy even after LoRA and hard masking
 9. **LoRA improves VALUE/KEY projections, not attention focus** - entropy only reduced 0.5%
-10. **For surgical video + limited data: use high-rank LoRA, train 1-2 epochs max**
+10. **Gap to SwinCVS: 11.47%** - Fundamental architectural limitation (global vs window attention)
 
 ## Root Cause Analysis
 
@@ -1189,32 +1248,29 @@ The ~50% mAP ceiling is explained by multiple factors:
 
 **COMPLETED:**
 - ✅ Exp10a: LoRA r=16 (53.75% mAP)
-- ✅ Exp10b: LoRA r=32 + k_proj (54.61% mAP) 🏆
+- ✅ Exp10b: LoRA r=32 + k_proj (54.61% mAP)
 - ✅ Exp10c: LoRA r=16 low LR (52.56% mAP)
+- ✅ Exp11: Attention supervision (49.77% mAP) ❌ Failed
+- ✅ Exp12: Regularization + Hard masking (55.98% mAP) 🏆 **Best**
 
 **HIGH PRIORITY - Next:**
-1. 📋 **Even higher LoRA rank (r=64)**
-   - If r=32 helps, r=64 might help more
-   - Train for only 1 epoch to avoid overfitting
+1. 📋 **Exp13: Small ViT with window attention (train from scratch)**
+   - Bypass V-JEPA's architectural limitations entirely
+   - ~25M params, 12 layers, window attention
 
-2. 📋 **MixUp/CutMix regularization**
-   - Critical for transformer training
-   - May allow training longer without overfitting
-   - Can combine with LoRA approach
+2. 📋 **Exp14: Hybrid SwinCVS + V-JEPA**
+   - SwinCVS for spatial features, V-JEPA for temporal
+   - Best of both architectures
 
-3. 📋 **Analyze Exp10b attention patterns**
-   - Did k_proj actually change attention entropy?
-   - Compare attention heatmaps vs Exp10a
+3. 📋 **Exp15: V-JEPA with architectural window attention**
+   - Replace global attention with window attention
+   - Force local focus at the architecture level
 
 **Medium Priority:**
-4. Label smoothing to prevent overconfident predictions
-5. Test-Time Augmentation (free boost)
-6. Ensemble of multiple training runs
-
-**Research Priority:**
-7. Hybrid approaches (SwinCVS spatial + V-JEPA temporal)
-8. Attention supervision using segmentation masks
+4. Test-Time Augmentation (free boost)
+5. Ensemble of multiple training runs
+6. Even higher LoRA rank (r=64) with Exp12 regularization
 
 ---
 
-*Last updated: 2026-02-03 (Added layer entropy analysis, Exp11 completed as failed, Exp12 running)*
+*Last updated: 2026-02-04 (Exp12 completed: 55.98% mAP - new best with regularization + hard masking)*
