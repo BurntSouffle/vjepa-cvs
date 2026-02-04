@@ -633,11 +633,10 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler,
     ham_enabled = ham_config.get("enabled", False) and ham_config.get("apply_during_training", False)
     ham_spatial_size = ham_config.get("spatial_size", 16)
 
-    # Infer temporal bins from config
-    num_frames = config.get("num_frames", 16)
-    # V-JEPA fpc=16: temporal stride of 2 -> bins = ceil(T / 2)
-    # But for T < 16 the model may produce fewer tokens
-    num_temporal_bins = config.get("num_temporal_bins", None)
+    # V-JEPA fpc16 always produces 8 temporal bins (16 padded frames / stride 2).
+    # This is constant regardless of how many real frames we have (5, 8, 16, etc.)
+    # because process_videos() pads to 16 frames before the backbone sees them.
+    num_temporal_bins = 8
 
     pbar = tqdm(train_loader, desc="Training")
     for batch_idx, batch in enumerate(pbar):
@@ -657,20 +656,15 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler,
         if label_smoothing > 0:
             cvs_labels = smooth_labels(cvs_labels, label_smoothing)
 
-        # Hard attention mask
+        # Hard attention mask: [B, 2048] matching V-JEPA's output tokens
         attention_mask = None
         if ham_enabled and len(mask_batch_indices) > 0:
-            # Determine temporal bins from actual feature size on first batch
-            if num_temporal_bins is None:
-                # Will be set after first forward pass; skip HAM for first batch
-                pass
-            else:
-                attention_mask = create_spatial_mask_from_segmentation(
-                    masks, mask_batch_indices,
-                    batch_size=pixel_values.size(0),
-                    spatial_size=ham_spatial_size,
-                    num_temporal_bins=num_temporal_bins,
-                )
+            attention_mask = create_spatial_mask_from_segmentation(
+                masks, mask_batch_indices,
+                batch_size=pixel_values.size(0),
+                spatial_size=ham_spatial_size,
+                num_temporal_bins=num_temporal_bins,
+            )
 
         is_accumulating = (
             (batch_idx + 1) % accum_steps != 0
@@ -680,15 +674,6 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler,
         if use_amp and scaler is not None:
             with autocast():
                 outputs = model(pixel_values, mask_frame_indices, mask_batch_indices, attention_mask)
-
-                # Infer temporal bins from feature shape on first pass
-                if num_temporal_bins is None and "cvs_logits" in outputs:
-                    features_tokens = outputs["cvs_logits"].shape  # Not useful
-                    # Get from features directly in next iteration
-                    # For now use ceil(T/2) heuristic
-                    config["num_temporal_bins"] = max(1, (num_frames + 1) // 2)
-                    num_temporal_bins = config["num_temporal_bins"]
-
                 seg_logits = outputs.get("seg_logits")
                 loss_dict = criterion(
                     outputs["cvs_logits"], cvs_labels,
@@ -708,9 +693,6 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler,
                 scheduler.step()
         else:
             outputs = model(pixel_values, mask_frame_indices, mask_batch_indices, attention_mask)
-            if num_temporal_bins is None:
-                config["num_temporal_bins"] = max(1, (num_frames + 1) // 2)
-                num_temporal_bins = config["num_temporal_bins"]
             seg_logits = outputs.get("seg_logits")
             loss_dict = criterion(
                 outputs["cvs_logits"], cvs_labels,
@@ -975,7 +957,6 @@ def main(config_path="configs/exp14_clean_labels.yaml"):
         "hard_attention_masking": ham_config,
         "label_smoothing": training_cfg.get("label_smoothing", 0.0),
         "num_frames": dataset_cfg["num_frames"],
-        "num_temporal_bins": None,  # Auto-detect from model
     }
 
     best_metric, best_epoch = 0.0, 0
