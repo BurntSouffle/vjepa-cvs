@@ -64,9 +64,20 @@ training:
 
 # Data paths
 data:
+  # Endoscapes dataset
   endoscapes_root: "/workspace/vjepa/data/endoscapes"
   gt_masks_dir: "/workspace/vjepa/data/endoscapes/semseg"
-  synthetic_masks_dir: "/workspace/vjepa/data/synthetic_masks"
+  endoscapes_synthetic_masks_dir: "/workspace/vjepa/data/Masks/synthetic_masks_sam2"
+
+  # SAGES dataset (set to null to disable)
+  sages_root: "/workspace/vjepa/data/sages_cvs_challenge_2025_r1"
+  sages_masks_dir: "/workspace/vjepa/data/Masks/synthetic_masks/semantic"
+
+  # Control which datasets to include
+  include_endoscapes: true
+  include_sages: true
+
+  # Results
   results_dir: "/workspace/results/exp12_regularized"
 
 # Dataset configuration

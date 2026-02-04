@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset_multitask import MultiTaskCVSDataset, collate_fn
+from dataset_combined_multitask import CombinedMultiTaskDataset, collate_fn as combined_collate_fn
 from utils import (
     AverageMeter,
     EarlyStopping,
@@ -955,35 +956,75 @@ def main(config_path: str = "configs/exp12_regularized.yaml"):
     # Create datasets
     logger.info("\nCreating datasets...")
 
-    train_dataset = AugmentedMultiTaskDataset(
-        root_dir=config["data"]["endoscapes_root"],
-        split="train",
-        num_frames=config["dataset"]["num_frames"],
-        resolution=config["dataset"]["resolution"],
-        mask_resolution=config["dataset"].get("mask_resolution", 64),
-        augment=True,
-        use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
-        gt_masks_dir=config["data"].get("gt_masks_dir"),
-        synthetic_masks_dir=config["data"].get("synthetic_masks_dir"),
-        horizontal_flip_prob=aug_config.get("horizontal_flip_prob", 0.5),
-        rotation_degrees=aug_config.get("rotation_degrees", 15.0),
-        color_jitter=aug_config.get("color_jitter"),
-        random_erasing_prob=aug_config.get("random_erasing_prob", 0.2),
-        gaussian_blur_prob=aug_config.get("gaussian_blur_prob", 0.1),
-        gaussian_blur_sigma=tuple(aug_config.get("gaussian_blur_sigma", [0.1, 2.0])),
-    )
+    # Check if SAGES dataset is configured
+    use_combined = config["data"].get("sages_root") is not None
+    active_collate_fn = combined_collate_fn if use_combined else collate_fn
 
-    val_dataset = MultiTaskCVSDataset(
-        root_dir=config["data"]["endoscapes_root"],
-        split="val",
-        num_frames=config["dataset"]["num_frames"],
-        resolution=config["dataset"]["resolution"],
-        mask_resolution=config["dataset"].get("mask_resolution", 64),
-        augment=False,
-        use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
-        gt_masks_dir=config["data"].get("gt_masks_dir"),
-        synthetic_masks_dir=config["data"].get("synthetic_masks_dir"),
-    )
+    if use_combined:
+        logger.info("Using combined Endoscapes + SAGES dataset")
+        train_dataset = CombinedMultiTaskDataset(
+            endoscapes_root=config["data"]["endoscapes_root"],
+            sages_root=config["data"]["sages_root"],
+            split="train",
+            num_frames=config["dataset"]["num_frames"],
+            resolution=config["dataset"]["resolution"],
+            mask_resolution=config["dataset"].get("mask_resolution", 64),
+            augment=True,
+            horizontal_flip_prob=aug_config.get("horizontal_flip_prob", 0.5),
+            use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
+            endoscapes_gt_masks_dir=config["data"].get("gt_masks_dir"),
+            endoscapes_synthetic_masks_dir=config["data"].get("endoscapes_synthetic_masks_dir"),
+            sages_masks_dir=config["data"].get("sages_masks_dir"),
+            include_endoscapes=config["data"].get("include_endoscapes", True),
+            include_sages=config["data"].get("include_sages", True),
+        )
+
+        val_dataset = CombinedMultiTaskDataset(
+            endoscapes_root=config["data"]["endoscapes_root"],
+            sages_root=config["data"]["sages_root"],
+            split="val",
+            num_frames=config["dataset"]["num_frames"],
+            resolution=config["dataset"]["resolution"],
+            mask_resolution=config["dataset"].get("mask_resolution", 64),
+            augment=False,
+            use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
+            endoscapes_gt_masks_dir=config["data"].get("gt_masks_dir"),
+            endoscapes_synthetic_masks_dir=config["data"].get("endoscapes_synthetic_masks_dir"),
+            sages_masks_dir=config["data"].get("sages_masks_dir"),
+            include_endoscapes=config["data"].get("include_endoscapes", True),
+            include_sages=config["data"].get("include_sages", True),
+        )
+    else:
+        logger.info("Using Endoscapes-only dataset")
+        train_dataset = AugmentedMultiTaskDataset(
+            root_dir=config["data"]["endoscapes_root"],
+            split="train",
+            num_frames=config["dataset"]["num_frames"],
+            resolution=config["dataset"]["resolution"],
+            mask_resolution=config["dataset"].get("mask_resolution", 64),
+            augment=True,
+            use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
+            gt_masks_dir=config["data"].get("gt_masks_dir"),
+            synthetic_masks_dir=config["data"].get("synthetic_masks_dir"),
+            horizontal_flip_prob=aug_config.get("horizontal_flip_prob", 0.5),
+            rotation_degrees=aug_config.get("rotation_degrees", 15.0),
+            color_jitter=aug_config.get("color_jitter"),
+            random_erasing_prob=aug_config.get("random_erasing_prob", 0.2),
+            gaussian_blur_prob=aug_config.get("gaussian_blur_prob", 0.1),
+            gaussian_blur_sigma=tuple(aug_config.get("gaussian_blur_sigma", [0.1, 2.0])),
+        )
+
+        val_dataset = MultiTaskCVSDataset(
+            root_dir=config["data"]["endoscapes_root"],
+            split="val",
+            num_frames=config["dataset"]["num_frames"],
+            resolution=config["dataset"]["resolution"],
+            mask_resolution=config["dataset"].get("mask_resolution", 64),
+            augment=False,
+            use_synthetic_masks=config["dataset"].get("use_synthetic_masks", True),
+            gt_masks_dir=config["data"].get("gt_masks_dir"),
+            synthetic_masks_dir=config["data"].get("synthetic_masks_dir"),
+        )
 
     logger.info(f"Train: {len(train_dataset)} clips")
     logger.info(f"Val: {len(val_dataset)} clips")
@@ -994,7 +1035,7 @@ def main(config_path: str = "configs/exp12_regularized.yaml"):
         batch_size=training_cfg["batch_size"],
         shuffle=True,
         num_workers=training_cfg["num_workers"],
-        collate_fn=collate_fn,
+        collate_fn=active_collate_fn,
         pin_memory=True,
     )
 
@@ -1003,7 +1044,7 @@ def main(config_path: str = "configs/exp12_regularized.yaml"):
         batch_size=training_cfg["batch_size"],
         shuffle=False,
         num_workers=training_cfg["num_workers"],
-        collate_fn=collate_fn,
+        collate_fn=active_collate_fn,
         pin_memory=True,
     )
 
