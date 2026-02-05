@@ -209,10 +209,9 @@ def main(args, resume_preempt=False):
     # ----------------------------------------------------------------------- #
     logger.info('Creating surgical video dataset...')
 
-    # Create transforms
+    # Create transforms (make_transforms creates training augmentations by default)
     transform = make_transforms(
         crop_size=crop_size,
-        train=True,
         **args.get('data_aug', {})
     )
 
