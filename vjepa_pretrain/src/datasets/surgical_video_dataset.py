@@ -283,7 +283,8 @@ class SurgicalVideoDataset(Dataset):
         """Load and preprocess a single frame.
 
         Returns:
-            frame: numpy array [H, W, C] uint8 (format expected by transforms)
+            frame: numpy array [H, W, C] uint8 where C=3 (RGB)
+                   This is the format expected by JEPA video transforms.
         """
         img = Image.open(frame_path).convert('RGB')
 
@@ -291,11 +292,19 @@ class SurgicalVideoDataset(Dataset):
         if self.centre_crop:
             img = self._centre_crop_pil(img)
 
-        # Resize
+        # Resize to crop_size x crop_size
         img = img.resize((self.crop_size, self.crop_size), Image.BILINEAR)
 
-        # Return as numpy array [H, W, C] uint8 - transforms handle normalization
-        return np.array(img, dtype=np.uint8)
+        # Convert to numpy array [H, W, C] with dtype uint8
+        # PIL Image.convert('RGB') ensures 3 channels
+        # np.array on PIL image gives [H, W, C] format
+        frame = np.array(img, dtype=np.uint8)
+
+        # Verify shape is [H, W, 3]
+        assert frame.shape == (self.crop_size, self.crop_size, 3), \
+            f"Expected frame shape ({self.crop_size}, {self.crop_size}, 3), got {frame.shape}"
+
+        return frame
 
     def _load_mask(self, mask_path: str) -> torch.Tensor:
         """Load and preprocess a segmentation mask."""
@@ -334,20 +343,31 @@ class SurgicalVideoDataset(Dataset):
         Load a video clip and its anatomy map.
 
         Returns:
-            clip: (T, C, H, W) video tensor
+            clip: (C, T, H, W) video tensor after transform, or (T, H, W, C) numpy if no transform
             anatomy_map: (H, W) anatomy probability map (from middle frame mask)
             clip_info: String with clip metadata
         """
         clip_data = self.clips[idx]
 
-        # Load frames as numpy arrays [H, W, C]
+        # Load frames as numpy arrays [H, W, C] uint8
         frames = []
         for frame_path in clip_data['frames']:
             frame = self._load_frame(frame_path)
-            frames.append(frame)
+            # Ensure frame is [H, W, C] format
+            if frame.ndim == 3 and frame.shape[2] == 3:
+                frames.append(frame)
+            elif frame.ndim == 3 and frame.shape[0] == 3:
+                # Wrong format [C, H, W], transpose to [H, W, C]
+                frames.append(frame.transpose(1, 2, 0))
+            else:
+                raise ValueError(f"Unexpected frame shape: {frame.shape}")
 
-        # Stack to [T, H, W, C] - format expected by transforms
+        # Stack to [T, H, W, C] - format expected by JEPA transforms
         clip = np.stack(frames, axis=0)
+
+        # Verify shape is [T, H, W, C] where C=3
+        if clip.shape[-1] != 3:
+            raise ValueError(f"Expected clip shape [T, H, W, 3], got {clip.shape}")
 
         # Load mask for middle frame (use for anatomy guidance)
         middle_idx = len(clip_data['masks']) // 2
@@ -356,6 +376,7 @@ class SurgicalVideoDataset(Dataset):
         anatomy_map = self._mask_to_anatomy_map(mask)
 
         # Apply transforms if available
+        # Transform expects [T, H, W, C] numpy and returns [C, T, H, W] tensor
         if self.transform is not None:
             clip = self.transform(clip)
 
