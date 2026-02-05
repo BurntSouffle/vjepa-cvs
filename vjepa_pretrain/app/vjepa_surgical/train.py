@@ -320,6 +320,13 @@ def main(args, resume_preempt=False):
         mixed_precision=mixed_precision,
     )
 
+    # -- Create momentum scheduler for EMA (linear interpolation from ema[0] to ema[1])
+    total_iters = int(ipe * epochs * ipe_scale)
+    momentum_scheduler = (
+        ema[0] + i * (ema[1] - ema[0]) / total_iters
+        for i in range(total_iters + 1)
+    )
+
     # ----------------------------------------------------------------------- #
     #  LOAD CHECKPOINT (for resuming)
     # ----------------------------------------------------------------------- #
@@ -441,9 +448,9 @@ def main(args, resume_preempt=False):
                 scheduler.step()
                 wd_scheduler.step()
 
-                # Update EMA
+                # Update EMA (momentum from scheduler)
                 with torch.no_grad():
-                    m = next(ema)
+                    m = next(momentum_scheduler)
                     for p_ema, p in zip(target_encoder.parameters(), encoder.parameters()):
                         p_ema.data.mul_(m).add_(p.data, alpha=1 - m)
 
