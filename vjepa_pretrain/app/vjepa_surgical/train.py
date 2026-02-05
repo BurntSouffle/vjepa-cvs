@@ -194,10 +194,14 @@ def main(args, resume_preempt=False):
 
     csv_logger = None
     if rank == 0:
+        log_file = log_folder / f'{tag}.csv'
         csv_logger = CSVLogger(
-            log_folder,
-            ['epoch', 'itr', 'loss', 'lr', 'attention_entropy'],
-            tag=tag
+            log_file,
+            ('%d', 'epoch'),
+            ('%d', 'itr'),
+            ('%.5f', 'loss'),
+            ('%.2e', 'lr'),
+            ('%.4f', 'attention_entropy'),
         )
 
     # ----------------------------------------------------------------------- #
