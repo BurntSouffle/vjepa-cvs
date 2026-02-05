@@ -390,26 +390,29 @@ def main(args, resume_preempt=False):
 
             iter_start = time.time()
 
-            # Forward pass
+            # Forward pass (following original JEPA pattern)
             with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):
-                # Encode context (unmasked patches)
-                h = encoder(videos, masks_enc)
-
-                # Get target representations
+                # Get target representations (list of tensors, one per mask)
                 with torch.no_grad():
                     h_target = target_encoder(videos)
-                    h_target = F.layer_norm(h_target, h_target.shape[-1:])
-                    h_target = apply_masks(h_target, masks_pred)
-                    h_target = repeat_interleave_batch(h_target, len(masks_pred))
+                    h_target = F.layer_norm(h_target, (h_target.size(-1),))
+                    # concat=False returns list of [B, K_i, D] tensors
+                    h_target_list = apply_masks(h_target, masks_pred, concat=False)
 
-                # Predict masked patches
-                h_pred = predictor(h, masks_enc, masks_pred)
+                # Encode context (unmasked patches)
+                z = encoder(videos, masks_enc)
 
-                # Compute loss (L2)
-                loss = F.mse_loss(h_pred, h_target)
+                # Predict masked patches (returns list matching h_target_list)
+                z_pred_list = predictor(z, h_target_list, masks_enc, masks_pred)
 
-                if loss_exp != 1.0:
-                    loss = loss ** loss_exp
+                # Compute loss for each mask pair and average
+                loss = 0.
+                for z_pred, h_tgt in zip(z_pred_list, h_target_list):
+                    if loss_exp == 1.0:
+                        loss += F.mse_loss(z_pred, h_tgt)
+                    else:
+                        loss += torch.mean(torch.abs(z_pred - h_tgt) ** loss_exp) / loss_exp
+                loss = loss / len(masks_pred)
 
                 loss = loss / gradient_accumulation
 
