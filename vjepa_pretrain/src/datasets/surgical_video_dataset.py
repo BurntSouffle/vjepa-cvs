@@ -279,8 +279,12 @@ class SurgicalVideoDataset(Dataset):
 
         return img.crop((left, top, left + crop_size, top + crop_size))
 
-    def _load_frame(self, frame_path: str) -> torch.Tensor:
-        """Load and preprocess a single frame."""
+    def _load_frame(self, frame_path: str) -> np.ndarray:
+        """Load and preprocess a single frame.
+
+        Returns:
+            frame: numpy array [H, W, C] uint8 (format expected by transforms)
+        """
         img = Image.open(frame_path).convert('RGB')
 
         # Centre crop
@@ -290,10 +294,8 @@ class SurgicalVideoDataset(Dataset):
         # Resize
         img = img.resize((self.crop_size, self.crop_size), Image.BILINEAR)
 
-        # Convert to tensor [C, H, W] and normalize to [0, 1]
-        img = torch.tensor(np.array(img), dtype=torch.float32).permute(2, 0, 1) / 255.0
-
-        return img
+        # Return as numpy array [H, W, C] uint8 - transforms handle normalization
+        return np.array(img, dtype=np.uint8)
 
     def _load_mask(self, mask_path: str) -> torch.Tensor:
         """Load and preprocess a segmentation mask."""
@@ -338,13 +340,14 @@ class SurgicalVideoDataset(Dataset):
         """
         clip_data = self.clips[idx]
 
-        # Load frames
+        # Load frames as numpy arrays [H, W, C]
         frames = []
         for frame_path in clip_data['frames']:
             frame = self._load_frame(frame_path)
             frames.append(frame)
 
-        clip = torch.stack(frames, dim=0)  # (T, C, H, W)
+        # Stack to [T, H, W, C] - format expected by transforms
+        clip = np.stack(frames, axis=0)
 
         # Load mask for middle frame (use for anatomy guidance)
         middle_idx = len(clip_data['masks']) // 2
