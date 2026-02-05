@@ -347,42 +347,53 @@ class SurgicalVideoDataset(Dataset):
             anatomy_map: (H, W) anatomy probability map (from middle frame mask)
             clip_info: String with clip metadata
         """
-        clip_data = self.clips[idx]
+        try:
+            clip_data = self.clips[idx]
 
-        # Load frames as numpy arrays [H, W, C] uint8
-        frames = []
-        for frame_path in clip_data['frames']:
-            frame = self._load_frame(frame_path)
-            # Ensure frame is [H, W, C] format
-            if frame.ndim == 3 and frame.shape[2] == 3:
-                frames.append(frame)
-            elif frame.ndim == 3 and frame.shape[0] == 3:
-                # Wrong format [C, H, W], transpose to [H, W, C]
-                frames.append(frame.transpose(1, 2, 0))
+            # Load frames as numpy arrays [H, W, C] uint8
+            frames = []
+            for frame_path in clip_data['frames']:
+                frame = self._load_frame(frame_path)
+                # Ensure frame is [H, W, C] format
+                if frame.ndim == 3 and frame.shape[2] == 3:
+                    frames.append(frame)
+                elif frame.ndim == 3 and frame.shape[0] == 3:
+                    # Wrong format [C, H, W], transpose to [H, W, C]
+                    frames.append(frame.transpose(1, 2, 0))
+                else:
+                    raise ValueError(f"Unexpected frame shape: {frame.shape}")
+
+            # Stack to [T, H, W, C] - format expected by JEPA transforms
+            clip = np.stack(frames, axis=0)
+
+            # Verify shape is [T, H, W, C] where C=3
+            if clip.shape[-1] != 3:
+                raise ValueError(f"Expected clip shape [T, H, W, 3], got {clip.shape}")
+
+            # Load mask for middle frame (use for anatomy guidance)
+            middle_idx = len(clip_data['masks']) // 2
+            mask_path = clip_data['masks'][middle_idx]
+            mask = self._load_mask(mask_path)
+            anatomy_map = self._mask_to_anatomy_map(mask)
+
+            # Apply transforms if available
+            # Transform expects [T, H, W, C] numpy and returns [C, T, H, W] tensor
+            if self.transform is not None:
+                clip = self.transform(clip)
+
+            clip_info = f"{clip_data['source']}_{clip_data['video_id']}"
+
+            return clip, anatomy_map, clip_info
+
+        except Exception as e:
+            # Log the error and return a different valid sample
+            logger.warning(f"Error loading sample {idx}: {e}. Trying another sample.")
+            # Try a different random sample
+            new_idx = random.randint(0, len(self) - 1)
+            if new_idx != idx:
+                return self.__getitem__(new_idx)
             else:
-                raise ValueError(f"Unexpected frame shape: {frame.shape}")
-
-        # Stack to [T, H, W, C] - format expected by JEPA transforms
-        clip = np.stack(frames, axis=0)
-
-        # Verify shape is [T, H, W, C] where C=3
-        if clip.shape[-1] != 3:
-            raise ValueError(f"Expected clip shape [T, H, W, 3], got {clip.shape}")
-
-        # Load mask for middle frame (use for anatomy guidance)
-        middle_idx = len(clip_data['masks']) // 2
-        mask_path = clip_data['masks'][middle_idx]
-        mask = self._load_mask(mask_path)
-        anatomy_map = self._mask_to_anatomy_map(mask)
-
-        # Apply transforms if available
-        # Transform expects [T, H, W, C] numpy and returns [C, T, H, W] tensor
-        if self.transform is not None:
-            clip = self.transform(clip)
-
-        clip_info = f"{clip_data['source']}_{clip_data['video_id']}"
-
-        return clip, anatomy_map, clip_info
+                return self.__getitem__((idx + 1) % len(self))
 
 
 class SurgicalVideoCollator:
