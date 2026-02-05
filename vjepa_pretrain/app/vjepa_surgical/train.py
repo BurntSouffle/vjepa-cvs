@@ -257,6 +257,7 @@ def main(args, resume_preempt=False):
 
     # Initialize encoder and predictor
     encoder, predictor = init_video_model(
+        device=device,
         model_name=model_name,
         crop_size=crop_size,
         patch_size=patch_size,
