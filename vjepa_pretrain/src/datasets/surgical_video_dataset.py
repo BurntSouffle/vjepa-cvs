@@ -343,57 +343,81 @@ class SurgicalVideoDataset(Dataset):
         Load a video clip and its anatomy map.
 
         Returns:
-            clip: (C, T, H, W) video tensor after transform, or (T, H, W, C) numpy if no transform
-            anatomy_map: (H, W) anatomy probability map (from middle frame mask)
+            clip: (C, T, H, W) video tensor after transform
+            anatomy_map: (H, W) anatomy probability map (from middle frame mask), never None
             clip_info: String with clip metadata
         """
-        try:
-            clip_data = self.clips[idx]
+        max_retries = 10
 
-            # Load frames as numpy arrays [H, W, C] uint8
-            frames = []
-            for frame_path in clip_data['frames']:
-                frame = self._load_frame(frame_path)
-                # Ensure frame is [H, W, C] format
-                if frame.ndim == 3 and frame.shape[2] == 3:
-                    frames.append(frame)
-                elif frame.ndim == 3 and frame.shape[0] == 3:
-                    # Wrong format [C, H, W], transpose to [H, W, C]
-                    frames.append(frame.transpose(1, 2, 0))
+        for retry in range(max_retries):
+            try:
+                actual_idx = (idx + retry) % len(self)
+                clip_data = self.clips[actual_idx]
+
+                # Load frames as numpy arrays [H, W, C] uint8
+                frames = []
+                for frame_path in clip_data['frames']:
+                    frame = self._load_frame(frame_path)
+                    if frame is None:
+                        raise ValueError(f"Failed to load frame: {frame_path}")
+                    # Ensure frame is [H, W, C] format
+                    if frame.ndim == 3 and frame.shape[2] == 3:
+                        frames.append(frame)
+                    elif frame.ndim == 3 and frame.shape[0] == 3:
+                        # Wrong format [C, H, W], transpose to [H, W, C]
+                        frames.append(frame.transpose(1, 2, 0))
+                    else:
+                        raise ValueError(f"Unexpected frame shape: {frame.shape}")
+
+                if len(frames) == 0:
+                    raise ValueError("No frames loaded")
+
+                # Stack to [T, H, W, C] - format expected by JEPA transforms
+                clip = np.stack(frames, axis=0)
+
+                # Verify shape is [T, H, W, C] where C=3
+                if clip.shape[-1] != 3:
+                    raise ValueError(f"Expected clip shape [T, H, W, 3], got {clip.shape}")
+
+                # Load mask for middle frame (use for anatomy guidance)
+                middle_idx = len(clip_data['masks']) // 2
+                mask_path = clip_data['masks'][middle_idx]
+                mask = self._load_mask(mask_path)
+                anatomy_map = self._mask_to_anatomy_map(mask)
+
+                # IMPORTANT: If anatomy_map is None, create a default one (uniform weights)
+                if anatomy_map is None:
+                    anatomy_map = torch.full(
+                        (self.crop_size, self.crop_size),
+                        0.5,  # Default uniform weight
+                        dtype=torch.float32
+                    )
+
+                # Apply transforms if available
+                # Transform expects [T, H, W, C] numpy and returns [C, T, H, W] tensor
+                if self.transform is not None:
+                    clip = self.transform(clip)
+
+                # Verify clip is not None after transform
+                if clip is None:
+                    raise ValueError("Transform returned None")
+
+                clip_info = f"{clip_data['source']}_{clip_data['video_id']}"
+
+                return clip, anatomy_map, clip_info
+
+            except Exception as e:
+                if retry < max_retries - 1:
+                    logger.warning(f"Error loading sample {actual_idx}, retry {retry + 1}/{max_retries}: {e}")
                 else:
-                    raise ValueError(f"Unexpected frame shape: {frame.shape}")
+                    logger.error(f"All retries failed for idx {idx}: {e}")
 
-            # Stack to [T, H, W, C] - format expected by JEPA transforms
-            clip = np.stack(frames, axis=0)
-
-            # Verify shape is [T, H, W, C] where C=3
-            if clip.shape[-1] != 3:
-                raise ValueError(f"Expected clip shape [T, H, W, 3], got {clip.shape}")
-
-            # Load mask for middle frame (use for anatomy guidance)
-            middle_idx = len(clip_data['masks']) // 2
-            mask_path = clip_data['masks'][middle_idx]
-            mask = self._load_mask(mask_path)
-            anatomy_map = self._mask_to_anatomy_map(mask)
-
-            # Apply transforms if available
-            # Transform expects [T, H, W, C] numpy and returns [C, T, H, W] tensor
-            if self.transform is not None:
-                clip = self.transform(clip)
-
-            clip_info = f"{clip_data['source']}_{clip_data['video_id']}"
-
-            return clip, anatomy_map, clip_info
-
-        except Exception as e:
-            # Log the error and return a different valid sample
-            logger.warning(f"Error loading sample {idx}: {e}. Trying another sample.")
-            # Try a different random sample
-            new_idx = random.randint(0, len(self) - 1)
-            if new_idx != idx:
-                return self.__getitem__(new_idx)
-            else:
-                return self.__getitem__((idx + 1) % len(self))
+        # If all retries failed, return a dummy sample (should never happen)
+        logger.error(f"Returning dummy sample for idx {idx}")
+        dummy_clip = torch.zeros(3, self.frames_per_clip, self.crop_size, self.crop_size)
+        dummy_map = torch.full((self.crop_size, self.crop_size), 0.5, dtype=torch.float32)
+        dummy_info = "dummy_sample"
+        return dummy_clip, dummy_map, dummy_info
 
 
 class SurgicalVideoCollator:
