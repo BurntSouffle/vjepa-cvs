@@ -357,10 +357,8 @@ def main(args, resume_preempt=False):
             videos, anatomy_maps, clip_infos = batch_data
 
             # Move to device
-            videos = videos.to(device, non_blocking=True)  # (B, T, C, H, W)
-
-            # Rearrange to (B, C, T, H, W) for V-JEPA
-            videos = videos.permute(0, 2, 1, 3, 4)
+            # Transform already outputs [C, T, H, W], so after collate: [B, C, T, H, W]
+            videos = videos.to(device, non_blocking=True)
 
             # Generate masks with anatomy guidance
             valid_anatomy_maps = [am for am in anatomy_maps if am is not None]
