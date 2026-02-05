@@ -61,30 +61,20 @@ mask:
   anatomy_bias: 0.7         # 70% anatomy-guided, 30% random
 
   # Short masks (many small blocks for fine-grained prediction)
-  - aspect_ratio:
-      - 0.75
-      - 1.5
+  short_mask:
+    aspect_ratio: [0.75, 1.5]
     num_blocks: 8           # Same as original V-JEPA
-    spatial_scale:
-      - 0.15
-      - 0.15
-    temporal_scale:
-      - 1.0
-      - 1.0
+    spatial_scale: [0.15, 0.15]
+    temporal_scale: [1.0, 1.0]
     max_temporal_keep: 1.0
     max_keep: null
 
   # Long masks (few large blocks for global understanding)
-  - aspect_ratio:
-      - 0.75
-      - 1.5
+  long_mask:
+    aspect_ratio: [0.75, 1.5]
     num_blocks: 2
-    spatial_scale:
-      - 0.7
-      - 0.7
-    temporal_scale:
-      - 1.0
-      - 1.0
+    spatial_scale: [0.7, 0.7]
+    temporal_scale: [1.0, 1.0]
     max_temporal_keep: 1.0
     max_keep: null
 
