@@ -130,8 +130,10 @@ def main(args, resume_preempt=False):
     # -- MASK
     cfgs_mask = args.get('mask')
     anatomy_bias = cfgs_mask.get('anatomy_bias', 0.7) if isinstance(cfgs_mask, dict) else 0.7
-    # Extract mask configs (skip 'type' and 'anatomy_bias' keys)
-    mask_configs = [m for m in cfgs_mask if isinstance(m, dict) and 'num_blocks' in m]
+    # Extract mask configs from dict values (e.g., short_mask, long_mask)
+    # Need to iterate over .items() since cfgs_mask is a dict, not a list
+    mask_configs = [v for k, v in cfgs_mask.items() if isinstance(v, dict) and 'num_blocks' in v]
+    logger.info(f'Found {len(mask_configs)} mask configurations')
 
     # -- MODEL
     cfgs_model = args.get('model')
@@ -380,6 +382,11 @@ def main(args, resume_preempt=False):
                 m_enc, m_pred = mask_gen(len(videos), pooled_maps)
                 masks_enc.append(m_enc.to(device))
                 masks_pred.append(m_pred.to(device))
+
+            # Verify masks were generated
+            if len(masks_enc) == 0 or len(masks_pred) == 0:
+                logger.warning(f'Empty masks at iteration {itr}, skipping batch')
+                continue
 
             iter_start = time.time()
 
